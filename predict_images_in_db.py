@@ -35,16 +35,22 @@ from albumentations import ReplayCompose, LongestMaxSize, PadIfNeeded, ToFloat
 
 STOP = 'STOP'
 
+
 def delete_image_from_db(cursor, image_id):
     cursor.execute(f"""DELETE FROM images WHERE images.image_id = '{image_id}'""")
 
+
 def get_images_to_predict(cursor, model_name):
-    cursor.execute(f"""SELECT images.image_id, images.image_name FROM images LEFT JOIN segmentation_confidences 
-                ON images.image_id = segmentation_confidences.image_id 
-                WHERE segmentation_confidences.model_name != '{model_name}' 
-                OR segmentation_confidences.model_name is NULL ORDER BY RANDOM() LIMIT 500;""")
+    cursor.execute(f"""SELECT * FROM (
+SELECT images.image_id, images.image_name FROM images LEFT JOIN segmentation_confidences 
+ON images.image_id = segmentation_confidences.image_id GROUP BY images.image_id
+EXCEPT SELECT images.image_id, images.image_name FROM images LEFT JOIN segmentation_confidences 
+ON images.image_id = segmentation_confidences.image_id
+WHERE segmentation_confidences.model_name IS NOT DISTINCT FROM '{model_name}') t
+ORDER BY RANDOM() LIMIT 500;""")
     image_ids_and_names = cursor.fetchmany(500)
     return image_ids_and_names
+
 
 def download_object(minio_client, image_name):
     data = minio_client.get_object('images', image_name)
@@ -53,6 +59,7 @@ def download_object(minio_client, image_name):
         image_bytes.write(d)
     image_bytes.seek(0)
     return image_bytes
+
 
 def download_and_preprocess_worker(output_queue):
     augmentations = ReplayCompose([
@@ -99,7 +106,7 @@ def download_and_preprocess_worker(output_queue):
 
                     delete_image_from_db(cursor, image_id)
                     continue
-
+                image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
                 image = augmentations(image=image)['image']
                 image = np.transpose(image, axes=(2, 0, 1))
 
@@ -111,6 +118,7 @@ def download_and_preprocess_worker(output_queue):
         else:
             time.sleep(5)
 
+
 def predict_worker(input_queue, output_queue):
     MODEL_PATH = os.getenv('MODEL_PATH')
     MODEL_DEVICE = os.getenv('DEVICE', 'cpu')
@@ -121,6 +129,7 @@ def predict_worker(input_queue, output_queue):
 
     # build model
     model = torch.jit.load(MODEL_PATH)
+    model.eval()
     model.to(MODEL_DEVICE)
 
     # for image_id, image_name, image_batch_np in iter(input_queue, STOP):
@@ -138,6 +147,7 @@ def predict_worker(input_queue, output_queue):
             print('image_name:', image_name, 'confidence:', confidence)
             output_queue.put((image_id, confidence), block=True)
             input_queue.task_done()
+
 
 def load_worker(input_queue):
     DB_HOST = os.getenv('DB_HOST', '')
@@ -163,9 +173,10 @@ def load_worker(input_queue):
             continue
         except Exception:
             traceback.print_exc()
+        input_queue.task_done()
+
 
 def main():
-
     NUM_EXTRACT_WORKERS = int(os.getenv('NUM_EXTRACT_WORKERS'))
     NUM_LOAD_WORKERS = int(os.getenv('NUM_LOAD_WORKERS'))
 
@@ -178,7 +189,7 @@ def main():
         p.start()
         download_and_preprocess_workers.append(p)
 
-    predict_workers =[]
+    predict_workers = []
     p = Process(target=predict_worker, args=(images_to_predict_queue, confidences_to_load_queue))
     p.start()
     predict_workers.append(p)

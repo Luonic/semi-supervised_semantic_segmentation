@@ -12,7 +12,8 @@ cfg = config.fromfile(cfg_path)
 
 device = 'cuda:0'
 device = 'cpu'
-model = cfg['model']['model_fn'](cfg['common']['num_classes'])
+# model = cfg['model']['model_fn'](cfg['common']['num_classes'])
+model = cfg['model']['model_fn']()
 model.to('cpu')
 model.eval()
 
@@ -20,27 +21,31 @@ workdir = cfg['common']['output_dir']
 # latest_checkpoint_path = os.path.join(workdir, 'best.pth')
 latest_checkpoint_path = os.path.join(workdir, 'checkpoint.pth')
 checkpoint = torch.load(latest_checkpoint_path, map_location='cpu')
-# model.load_state_dict(checkpoint)
 model.load_state_dict(checkpoint['state_dict'])
 
+
 # jit_model = torch.jit.trace(model, torch.ones((1, 3, cfg['common']['image_size'], cfg['common']['image_size']), dtype=torch.float32))
+# jit_model = torch.jit.script(model)
 # torch.jit.save(jit_model, os.path.join(workdir, 'model.ts'))
 # exit(0)
 
 model.to(device)
 
+# model = torch.quantization.quantize_dynamic(model, {torch.nn.Conv2d}, dtype=torch.qint8)
+
 # val_dataset = cfg['val']['dataset']()
-from albumentations import ReplayCompose, LongestMaxSize, PadIfNeeded, ToFloat
+from albumentations import ReplayCompose, LongestMaxSize, SmallestMaxSize, PadIfNeeded, ToFloat
 augmentations = ReplayCompose([
     LongestMaxSize(max_size=cfg['common']['image_size'], always_apply=True),
-    # PadIfNeeded(min_height=cfg['common']['image_size'], min_width=cfg['common']['image_size'], always_apply=True),
+    PadIfNeeded(min_height=cfg['common']['image_size'], min_width=cfg['common']['image_size'], always_apply=True),
     ToFloat()])
 val_dataset = cfg['train']['unsupervised_dataset'](augmentations=augmentations)
 val_dataloader = torch.utils.data.DataLoader(val_dataset,
                                              batch_size=1,
                                              pin_memory=False,
                                              drop_last=False,
-                                             num_workers=1)
+                                             num_workers=1,
+                                             shuffle=True)
 
 with torch.no_grad():
     for sample in val_dataloader:
@@ -48,19 +53,24 @@ with torch.no_grad():
         # mask = sample['semantic_mask'].to(device, non_blocking=True)
 
         # pred_map = model(image)['out']
-        pred_map = model(image)
-        pred_map = torch.sigmoid(pred_map)
-        print(image.size(), pred_map.size())
+
+        pred_maps = model(image)
+        pred_map = torch.sigmoid(pred_maps[-1])
+        # print(image.size(), pred_map.size())
         pred_map = torch.nn.functional.interpolate(pred_map, size=(image.size(2), image.size(3)), mode='bilinear')
         binary_mask = (pred_map > 0.5).to(pred_map)
         # pred_map = binary_mask
-        print('max', pred_map.max().item())
+        print('max', pred_map.max().item(), 'min', pred_map.min().item())
         confidence = torch.nn.functional.binary_cross_entropy(pred_map, binary_mask, reduction='mean')
         print(f'Confidence: {confidence.item()}')
         skin_mask = (pred_map[0, 1].cpu().numpy() * 255).astype(np.uint8)
 
 
         numpy_image = cv2.cvtColor(np.transpose(image[0].cpu().numpy(), axes=(1, 2, 0)), cv2.COLOR_RGB2BGR)
+
+        ratio = 1650 / 2 / max(numpy_image.shape)
+        skin_mask = cv2.resize(skin_mask, None, fx=ratio, fy=ratio)
+        numpy_image = cv2.resize(numpy_image, None, fx=ratio, fy=ratio)
 
         cv2.imshow('skin', skin_mask)
         cv2.imshow('image', numpy_image)

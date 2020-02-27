@@ -3,7 +3,7 @@ import torch.nn as nn
 
 
 class UNet(nn.Module):
-    def __init__(self, num_blocks, first_channels=64, max_width=512, norm_layer=nn.BatchNorm2d, train_upsampling=True):
+    def __init__(self, num_classes, num_blocks, first_channels=32, max_width=256, norm_layer=nn.BatchNorm2d, train_upsampling=True):
         super(UNet, self).__init__()
 
         self.num_blocks = num_blocks
@@ -34,8 +34,8 @@ class UNet(nn.Module):
             prev_ch = block_ch // 2 if block_shrink else block_ch
 
         self.final_block = nn.Sequential(DownBlock(prev_ch, prev_ch, kernel_size=3, norm_layer=norm_layer),
-                                         nn.Conv2d(prev_ch, 2, 1, bias=False))
-        self.feature_channels = 2
+                                         nn.Conv2d(prev_ch, num_classes, 1, bias=False))
+        self.feature_channels = num_classes
 
     def get_feature_channels(self):
         return self.feature_channels
@@ -62,12 +62,14 @@ class UpBlock(nn.Module):
         if train_upsampling:
             self.upsampler = nn.Sequential(
                 nn.ConvTranspose2d(in_channels, out_channels, kernel_size=4, stride=2, padding=1),
+                norm_layer(out_channels),
                 nn.ReLU()
             )
         else:
             self.upsampler = nn.Sequential(
                 nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
                 nn.Conv2d(in_channels, out_channels, 1, bias=False),
+                norm_layer(out_channels),
                 nn.ReLU()
             )
 

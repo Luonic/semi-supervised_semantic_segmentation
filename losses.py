@@ -2,24 +2,46 @@ import torch
 import torch.nn as nn
 import numpy as np
 import torch.nn.functional as F
+import lovasz
+
+
+class CalculateLoss():
+    def __init__(self, losses):
+        # losses: dict of:
+        # 'loss_fn': class instance or fn to run like loss_fn(prediction, target)
+        # 'weight': scalar to multiply loss to
+        self.losses = losses
+
+    def __call__(self, predictions_list, target):
+        loss = 0
+        for prediction in predictions_list:
+            prediction = torch.nn.functional.interpolate(prediction, size=(target.size(2), target.size(3)),
+                                                         mode='bilinear', align_corners=False)
+            for loss_spec in self.losses:
+                loss += loss_spec['loss_fn'](prediction, target) * loss_spec['weight']
+        return loss
 
 
 class FocalLoss(nn.Module):
-    def __init__(self, alpha=1, gamma=2):
+    def __init__(self, alpha=0.25, gamma=2.0):
         super(FocalLoss, self).__init__()
         self.alpha = alpha
         self.gamma = gamma
 
     def forward(self, inputs, targets):
-        logpt = -F.binary_cross_entropy_with_logits(
+        per_entry_cross_ent = F.binary_cross_entropy_with_logits(
             inputs, targets, reduction="none"
         )
-        pt = torch.exp(logpt)
+        prediction_probabilities = torch.sigmoid(inputs)
+        p_t = (targets * prediction_probabilities) + ((1 - targets) * (1 - prediction_probabilities))
+        modulating_factor = torch.pow(1.0 - p_t, self.gamma)
+        alpha_weight_factor = (targets * self.alpha + (1 - targets) * (1 - self.alpha))
+        focal_cross_entropy_loss = modulating_factor * alpha_weight_factor * per_entry_cross_ent
 
-        # compute the loss
-        loss = -((1 - pt).pow(self.gamma)) * logpt
-        loss = loss * (self.alpha * targets + (1 - self.alpha) * (1 - targets))
-        return torch.mean(loss)
+        normalizer = modulating_factor.sum()
+        return focal_cross_entropy_loss.sum() / (normalizer + 0.001)
+
+        # return focal_cross_entropy_loss.mean()
 
 
 class NormalizedFocalLossSigmoid(nn.Module):
@@ -152,3 +174,17 @@ def log_dice_loss(input, target, gamma=1.0):
     cardinality = (input + target).sum(dim=(1, 2, 3))
 
     return torch.pow(-torch.log(((2. * intersection + smooth) / (cardinality + smooth))), exponent=gamma)
+
+
+def binary_lovasz_loss_with_logits(input, target):
+    int_target = torch.argmax(target, dim=1, keepdim=False)
+    # input = torch.sigmoid(input)
+    target_list = torch.split(target, 1, dim=0)
+    input_list = torch.split(input, 1, dim=0)
+    loss = 0
+    num_valid_samples = 0
+    for inp, tgt in zip(input_list, target_list):
+        mask_sample = (tgt.sum() > 0).to(input)
+        num_valid_samples += mask_sample
+        loss += lovasz.lovasz_softmax(inp, tgt, classes=[1], ignore=255, per_image=True) * mask_sample
+    return loss / (num_valid_samples + 0.001)

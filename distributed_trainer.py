@@ -10,9 +10,10 @@ from torch.utils.tensorboard import SummaryWriter
 import config
 import train
 import utils.utils as utils
-
+import shutil
 
 def distributed_train(rank, cfg_path):
+    utils.seed_everything(0)
     cfg = config.fromfile(cfg_path)
     if not cfg['common']['use_cpu']:
         torch.distributed.init_process_group(backend="nccl", rank=rank, world_size=cfg['common']['world_size'])
@@ -26,18 +27,15 @@ def distributed_train(rank, cfg_path):
         dist.init_process_group("gloo", rank=rank, world_size=cfg['common']['world_size'])
         device = 'cpu'
 
-    model = cfg['model']['model_fn'](cfg['common']['num_classes'])
+    # model = cfg['model']['model_fn'](cfg['common']['num_classes'])
+    model = cfg['model']['model_fn']()
     model = model.to(device)
     if device != 'cpu':
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
     device_ids = [device] if device != 'cpu' else None
-    model = torch.nn.parallel.DistributedDataParallel(model, device_ids=device_ids, find_unused_parameters=True)
+    model = torch.nn.parallel.DistributedDataParallel(model, device_ids=device_ids, find_unused_parameters=False)
 
-    discriminator = cfg['model']['discriminator'](in_channels=cfg['common']['num_classes'] + 3) # Num channels + RGB
-    discriminator = discriminator.to(device)
-    discriminator = torch.nn.parallel.DistributedDataParallel(discriminator, device_ids=device_ids,
-                                                              find_unused_parameters=True)
-
+    # trainable_params = utils.get_trainable_params(model.module.decoder) + utils.get_trainable_params(model.module.final_block)
     trainable_params = utils.get_trainable_params(model)
     # trainable_params = model.module.get_params_with_layerwise_lr(model.module, cfg['train']['base_lr'])
     # trainable_params = model.module.get_params_with_layerwise_lr(
@@ -47,12 +45,6 @@ def distributed_train(rank, cfg_path):
     # )
 
     optimizer = cfg['train']['optimizer'](params=trainable_params)
-
-    discriminator_trainable_params = discriminator.module.parameters()
-    discriminator_optimizer = cfg['train']['discriminator_optimizer'](params=discriminator_trainable_params)
-
-    lr_scheduler = cfg['train']['lr_scheduler'](optimizer)
-    discriminator_lr_scheduler = cfg['train']['lr_scheduler'](discriminator_optimizer)
 
     output_dir = cfg['common']['output_dir']
     train_dir = output_dir
@@ -67,12 +59,12 @@ def distributed_train(rank, cfg_path):
         best_metric = checkpoint['best_metric']
         last_epoch = checkpoint['epoch']
         model.module.load_state_dict(checkpoint['state_dict'])
-        discriminator.module.load_state_dict(checkpoint['discriminator_state_dict'])
-        # optimizer.load_state_dict(checkpoint['optimizer'])
-        # discriminator_optimizer.load_state_dict(checkpoint['discriminator_optimizer'])
+        optimizer.load_state_dict(checkpoint['optimizer'])
         print(f'Loaded checkpoint: Epoch {checkpoint["epoch"]}')
         del checkpoint
         torch.cuda.empty_cache()
+
+    lr_scheduler = cfg['train']['lr_scheduler'](optimizer)
 
     # Preaparing dataloaders here
     train_dataset = cfg['train']['dataset']()
@@ -84,15 +76,16 @@ def distributed_train(rank, cfg_path):
                                                    drop_last=True,
                                                    num_workers=cfg['train']['num_dataloader_workers'])
 
-    unsupervised_dataset = cfg['train']['unsupervised_dataset']()
-    unsupervised_sampler = torch.utils.data.distributed.DistributedSampler(unsupervised_dataset)
-    unsupervised_dataloader = torch.utils.data.DataLoader(unsupervised_dataset,
-                                                   batch_size=cfg['train']['batch_size_per_worker'],
-                                                   sampler=unsupervised_sampler,
-                                                   pin_memory=True,
-                                                   drop_last=True,
-                                                   num_workers=cfg['train']['num_dataloader_workers'])
-    unsupervised_dataloader = iter(unsupervised_dataloader)
+    # unsupervised_dataset = cfg['train']['unsupervised_dataset']()
+    # unsupervised_sampler = torch.utils.data.distributed.DistributedSampler(unsupervised_dataset)
+    # unsupervised_dataloader = torch.utils.data.DataLoader(unsupervised_dataset,
+    #                                                       batch_size=cfg['train']['batch_size_per_worker'],
+    #                                                       sampler=unsupervised_sampler,
+    #                                                       pin_memory=True,
+    #                                                       drop_last=True,
+    #                                                       num_workers=cfg['train']['num_dataloader_workers'])
+    # unsupervised_dataloader = iter(unsupervised_dataloader)
+    unsupervised_dataloader = None
 
     val_dataset = cfg['val']['dataset']()
     val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset)
@@ -122,9 +115,7 @@ def distributed_train(rank, cfg_path):
 
         # Train one epoch
         train.train(model=model,
-                    discriminator=discriminator,
                     optimizer=optimizer,
-                    discriminator_optimizer=discriminator_optimizer,
                     dataloader=train_dataloader,
                     unsupervised_dataloader=unsupervised_dataloader,
                     epoch=epoch,
@@ -139,35 +130,32 @@ def distributed_train(rank, cfg_path):
         global_step = utils.calc_global_step(dataset_len=len(train_dataset), world_size=cfg['common']['world_size'],
                                              batch_size_per_worker=cfg['train']['batch_size_per_worker'],
                                              epoch=epoch + 1)
-        val_loss = train.validate(model=model,
-                                  dataloader=val_dataloader,
-                                  epoch=epoch,
-                                  initial_step=global_step,
-                                  summary_writer=summary_writer,
-                                  config=cfg,
-                                  device=device)
+        val_loss, val_metric = train.validate(model=model,
+                                              dataloader=val_dataloader,
+                                              epoch=epoch,
+                                              initial_step=global_step,
+                                              summary_writer=summary_writer,
+                                              config=cfg,
+                                              device=device)
         torch.cuda.empty_cache()
         torch.distributed.barrier()
 
         lr_scheduler.step(val_loss, epoch=epoch + 1)
-        discriminator_lr_scheduler.step(val_loss, epoch=epoch + 1)
 
         # TODO: Save checkpoint here
         if rank == 0:
-            if best_metric is None or val_loss < best_metric:
-                best_metric = val_loss
-                torch.save(model.module.state_dict(),
-                           os.path.join(train_dir, 'best.pth'))
-
             torch.save({
                 'epoch': epoch + 1,
-                'best_metric': best_metric,
+                'best_metric': val_metric,
                 'state_dict': model.module.state_dict(),
-                'discriminator_state_dict': discriminator.module.state_dict(),
                 'optimizer': optimizer.state_dict(),
-                'discriminator_optimizer': discriminator_optimizer.state_dict()
             }, os.path.join(train_dir, 'checkpoint.pth'))
             print(f'Saved checkpoint')
+
+            if best_metric is None or val_metric > best_metric:
+                best_metric = val_metric
+                shutil.copy2(os.path.join(train_dir, 'checkpoint.pth'),
+                             os.path.join(train_dir, 'best.pth'))
 
         torch.distributed.barrier()
         # TODO: Load checkpoint here

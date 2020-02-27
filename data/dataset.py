@@ -92,9 +92,69 @@ if __name__ == '__main__':
     import configs.default_config as dcfg
 
     augmentations = dcfg.train['augmentations']
-    dataset = SkinSegDataset(dataset_dir='/home/alex/Code/instascraped/dataset_1',
+
+    # from albumentations import (
+    #     RandomBrightnessContrast,
+    #     RandomGamma,
+    #     ToGray,
+    #     ToFloat,
+    #     Resize,
+    #     Crop,
+    #     CropNonEmptyMaskIfExists,
+    #     HorizontalFlip,
+    #     GridDistortion,
+    #     LongestMaxSize,
+    #     PadIfNeeded,
+    #     RandomResizedCrop,
+    #     ShiftScaleRotate,
+    #     Rotate,
+    #     ElasticTransform,
+    #     ImageCompression,
+    #     MotionBlur,
+    #     RGBShift,
+    #     HueSaturationValue,
+    #     OpticalDistortion,
+    #     GaussianBlur,
+    #     ISONoise,
+    #     ReplayCompose,
+    #     OneOf,
+    # )
+    # common = {'image_size': 1024}
+    # train = {'crop_size': 513}
+    # augmentations = ReplayCompose([
+    #     LongestMaxSize(max_size=common['image_size'], always_apply=True),
+    #     PadIfNeeded(min_height=common['image_size'], min_width=common['image_size'], always_apply=True),
+    #     # Rotate(limit=45, always_apply=True),
+    #     # RandomResizedCrop(height=train['crop_size'], width=train['crop_size'], scale=(0.25, 1.0), ratio=(0.75, 1.33),
+    #     #                   always_apply=True),
+    #     HorizontalFlip(p=0.5),
+    #     # OneOf([
+    #     #     RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2),
+    #     #     RandomGamma(gamma_limit=(80, 120))
+    #     # ], p=1),
+    #     # ToGray(p=0.1),
+    #     # OneOf([
+    #     #     RGBShift(r_shift_limit=30, g_shift_limit=30, b_shift_limit=30),
+    #     #     HueSaturationValue(hue_shift_limit=30, sat_shift_limit=30, val_shift_limit=0),
+    #     # ], p=0.5),
+    #     # OneOf([
+    #     #     GaussianBlur(blur_limit=9)
+    #     # ], p=0.1),
+    #     # OneOf([
+    #     #   # ImageCompression(quality_lower=70, quality_upper=90),
+    #         # ISONoise(color_shift=(0.01, 0.05),
+    #         #          intensity=(0.1, 0.5))
+    #     # ], p=0.1),
+    #     # OneOf([
+    #     #     ElasticTransform(p=0.5, alpha=120, sigma=120 * 0.05, alpha_affine=120 * 0.03),
+    #     #     GridDistortion(p=0.5),
+    #     #     OpticalDistortion(p=1, distort_limit=1, shift_limit=0.5)
+    #     # ], p=0.8),
+    #     ToFloat()
+    # ])
+    dataset = SkinSegDataset(dataset_dir='/home/alex/Code/instascraped/dataset_coco_no-blank',
                              augmentations=augmentations,
-                             partition=1)
+                             partition=0)
     for sample in dataset:
         image = sample['image']
         mask = sample['semantic_mask']
