@@ -16,8 +16,19 @@ from __future__ import print_function
 import os
 import logging
 
+import math
+
 import torch
 import torch.nn as nn
+
+try:
+    from typing_extensions import Final
+except:
+    # If you don't have `typing_extensions` installed, you can use a
+    # polyfill from `torch.jit`.
+    from torch.jit import Final
+
+from typing import List, Tuple
 
 from yacs.config import CfgNode as CN
 
@@ -151,7 +162,6 @@ class Bottleneck(nn.Module):
 class HighResolutionModule(nn.Module):
     # This module builds num_branches of conv layers for each resolution and
     # builds fuse layers to allow branches exchange information
-    # __constants__ = ['']
     def __init__(self, num_branches, blocks, num_blocks, num_inchannels,
                  num_channels, fuse_method, multi_scale_output=True):
         super(HighResolutionModule, self).__init__()
@@ -164,9 +174,9 @@ class HighResolutionModule(nn.Module):
 
         self.multi_scale_output = multi_scale_output
 
-        self.branches = self._make_branches(
+        self.branches: Final = self._make_branches(
             num_branches, blocks, num_blocks, num_channels)
-        self.fuse_layers = self._make_fuse_layers()
+        self.fuse_layers: Final = self._make_fuse_layers()
         self.relu = nn.ReLU(True)
 
     def _check_branches(self, num_branches, blocks, num_blocks,
@@ -278,22 +288,32 @@ class HighResolutionModule(nn.Module):
     def get_num_inchannels(self):
         return self.num_inchannels
 
-    def forward(self, x):
-        if self.num_branches == 1:
-            return [self.branches[0](x[0])]
+    def forward(self, x: List[torch.Tensor]):
+        # if self.num_branches == 1:
+        #     return [self.branches[0](x[0])]
 
-        for i in range(self.num_branches):
-            x[i] = self.branches[i](x[i])
+        # for i in range(self.num_branches):
+        #     x[i] = self.branches[i](x[i])
+
+        # out = []
+        branch_idx = 0
+        for branch_module in self.branches:
+            x[branch_idx] = branch_module(x[branch_idx])
+            branch_idx += 1
+
+        if self.num_branches == 1:
+            return x
 
         x_fuse = []
 
-        for i in range(len(self.fuse_layers)):
-            y = x[0] if i == 0 else self.fuse_layers[i][0](x[0])
-            for j in range(1, self.num_branches):
-                if i == j:
-                    y = y + x[j]
-                else:
-                    y = y + self.fuse_layers[i][j](x[j])
+        for scale_fuse_layers in self.fuse_layers:
+            tensors_to_fuse = []
+            input_idx = 0
+            for fuse_layer in scale_fuse_layers:
+                tensors_to_fuse.append(fuse_layer(x[input_idx]))
+                input_idx += 1
+
+            y = torch.stack(tensors_to_fuse, dim=0).sum(dim=0)
             x_fuse.append(self.relu(y))
 
         return x_fuse
@@ -305,7 +325,165 @@ blocks_dict = {
 }
 
 
+class Stage(nn.Module):
+    __constants__ = ['mods']
+
+    def __init__(self, layer_config, num_inchannels, multi_scale_output=True):
+        super(Stage, self).__init__()
+        num_modules = layer_config['NUM_MODULES']
+        num_branches = layer_config['NUM_BRANCHES']
+        num_blocks = layer_config['NUM_BLOCKS']
+        num_channels = layer_config['NUM_CHANNELS']
+        block = blocks_dict[layer_config['BLOCK']]
+        fuse_method = layer_config['FUSE_METHOD']
+
+        modules = []
+        for i in range(num_modules):
+            # multi_scale_output is only used last module
+            if not multi_scale_output and i == num_modules - 1:
+                reset_multi_scale_output = False
+            else:
+                reset_multi_scale_output = True
+
+            modules.append(
+                HighResolutionModule(
+                    num_branches,
+                    block,
+                    num_blocks,
+                    num_inchannels,
+                    num_channels,
+                    fuse_method,
+                    reset_multi_scale_output)
+            )
+            self.num_inchannels = modules[-1].get_num_inchannels()
+            self.mods = nn.ModuleList(modules)
+
+    def forward(self, input: List[torch.Tensor]):
+        x = input
+        for module in self.mods:
+            x = module(x)
+        return x
+
+
+class HigherDecoderStage(nn.Module):
+    # layers: Final
+    # cat_output: Final
+
+    def __init__(self, input_channels, output_channels, final_kernel_size, do_deconv, deconv_num_basic_blocks,
+                 deconv_output_channels, deconv_kernel_size, cat_output):
+        super(HigherDecoderStage, self).__init__()
+        layers = []
+        self.cat_output = cat_output
+
+        if do_deconv:
+            deconv_input_channels = input_channels
+            deconv_kernel_size, deconv_padding, deconv_output_padding = self._get_deconv_cfg(deconv_kernel_size)
+            layers.append(
+                nn.Sequential(
+                    nn.ConvTranspose2d(
+                        in_channels=deconv_input_channels,
+                        out_channels=deconv_output_channels,
+                        kernel_size=deconv_kernel_size,
+                        stride=2,
+                        padding=deconv_padding,
+                        output_padding=deconv_output_padding,
+                        bias=False),
+                    nn.BatchNorm2d(deconv_output_channels, momentum=BN_MOMENTUM),
+                    nn.ReLU(inplace=True)))
+
+            for i in range(deconv_num_basic_blocks):
+                layers.append(nn.Sequential(
+                    BasicBlock(deconv_output_channels, deconv_output_channels),
+                ))
+
+            classifier_input_channels = deconv_output_channels
+        else:
+            layers.append(nn.Identity())
+            classifier_input_channels = input_channels
+
+        self.layers = nn.Sequential(*layers)
+
+        self.output_layer = nn.Conv2d(in_channels=classifier_input_channels,
+                                      out_channels=output_channels,
+                                      kernel_size=final_kernel_size,
+                                      stride=1,
+                                      padding=1 if final_kernel_size == 3 else 0)
+
+    def _get_deconv_cfg(self, deconv_kernel):
+        if deconv_kernel == 4:
+            padding = 1
+            output_padding = 0
+        elif deconv_kernel == 3:
+            padding = 1
+            output_padding = 1
+        elif deconv_kernel == 2:
+            padding = 0
+            output_padding = 0
+
+        return deconv_kernel, padding, output_padding
+
+    def forward(self, input: torch.Tensor):
+        features = self.layers(input)
+        output = self.output_layer(features)
+        if self.cat_output:
+            features = torch.cat([features, output], dim=1)
+
+        return output, features
+
+
+class HigherDecoder(nn.Module):
+    # decoder_layers: Final
+
+    def __init__(self, input_channels, output_channels, final_kernel_size, num_deconvs, deconv_num_basic_blocks,
+                 deconv_output_channels, deconv_kernel_size, cat_output):
+        super(HigherDecoder, self).__init__()
+        decoder_layers = []
+        decoder_layers.append(
+            HigherDecoderStage(input_channels=input_channels,
+                               output_channels=output_channels,
+                               final_kernel_size=final_kernel_size,
+                               do_deconv=False,
+                               deconv_num_basic_blocks=None,
+                               deconv_output_channels=None,
+                               deconv_kernel_size=None,
+                               cat_output=cat_output[0])
+        )
+
+        prev_feature_channels = input_channels + output_channels if cat_output else input_channels
+        for i in range(num_deconvs):
+
+            decoder_layers.append(
+                HigherDecoderStage(input_channels=prev_feature_channels,
+                                   output_channels=output_channels,
+                                   final_kernel_size=final_kernel_size,
+                                   do_deconv=True,
+                                   deconv_num_basic_blocks=deconv_num_basic_blocks,
+                                   deconv_output_channels=deconv_output_channels[i],
+                                   deconv_kernel_size=deconv_kernel_size[i],
+                                   cat_output=cat_output[i])
+            )
+            prev_feature_channels = deconv_output_channels[i] + output_channels if cat_output else deconv_output_channels
+
+        self.decoder_layers = nn.ModuleList(decoder_layers)
+
+    def forward(self, input: torch.Tensor):
+        output: List[torch.Tensor] = []
+        features = input
+        for decoder_stage in self.decoder_layers:
+            stage_output, features = decoder_stage(features)
+            output.append(stage_output)
+        return output
+
+
 class PoseHigherResolutionNet(nn.Module):
+    # stage2: Final[nn.Sequential]
+    # stage3: Final[nn.Sequential]
+    # stage4: Final[nn.Sequential]
+    # transition1: Final[nn.ModuleList]
+    # transition2: Final[nn.ModuleList]
+    # transition3: Final[nn.ModuleList]
+
+    __constants__ = ['stage2', 'stage3', 'stage4', 'transition1', 'transition2', 'transition3']
 
     def __init__(self, cfg, **kwargs):
         self.inplanes = 64
@@ -329,8 +507,10 @@ class PoseHigherResolutionNet(nn.Module):
         ]
         # TODO: Replace hardcoded 256 with calculation of number of channels based on config
         self.transition1 = self._make_transition_layer([256], num_channels)
-        self.stage2, pre_stage_channels = self._make_stage(
-            self.stage2_cfg, num_channels)
+        # self.stage2, pre_stage_channels = self._make_stage(
+        #     self.stage2_cfg, num_channels)
+        self.stage2 = Stage(self.stage2_cfg, num_channels)
+        pre_stage_channels = self.stage2.num_inchannels
 
         self.stage3_cfg = cfg['STAGE3']
         num_channels = self.stage3_cfg['NUM_CHANNELS']
@@ -340,8 +520,10 @@ class PoseHigherResolutionNet(nn.Module):
         ]
         self.transition2 = self._make_transition_layer(
             pre_stage_channels, num_channels)
-        self.stage3, pre_stage_channels = self._make_stage(
-            self.stage3_cfg, num_channels)
+        # self.stage3, pre_stage_channels = self._make_stage(
+        #     self.stage3_cfg, num_channels)
+        self.stage3 = Stage(self.stage3_cfg, num_channels)
+        pre_stage_channels = self.stage3.num_inchannels
 
         self.stage4_cfg = cfg['STAGE4']
         num_channels = self.stage4_cfg['NUM_CHANNELS']
@@ -351,12 +533,23 @@ class PoseHigherResolutionNet(nn.Module):
         ]
         self.transition3 = self._make_transition_layer(
             pre_stage_channels, num_channels)
-        self.stage4, pre_stage_channels = self._make_stage(
-            self.stage4_cfg, num_channels, multi_scale_output=False)
+        # self.stage4, pre_stage_channels = self._make_stage(
+        #     self.stage4_cfg, num_channels, multi_scale_output=False)
+        self.stage4 = Stage(self.stage4_cfg, num_channels, multi_scale_output=False)
+        pre_stage_channels = self.stage4.num_inchannels
 
-        self.final_layers = self._make_final_layers(cfg, pre_stage_channels[0])
-        self.deconv_layers = self._make_deconv_layers(
-            cfg, pre_stage_channels[0])
+        # self.final_layers = self._make_final_layers(cfg, pre_stage_channels[0])
+        # self.deconv_layers = self._make_deconv_layers(
+        #     cfg, pre_stage_channels[0])
+
+        self.decoder = HigherDecoder(input_channels=pre_stage_channels[0],
+                                     output_channels=cfg.NUM_JOINTS,
+                                     final_kernel_size=cfg.FINAL_CONV_KERNEL,
+                                     num_deconvs=cfg.NUM_JOINTS,
+                                     deconv_num_basic_blocks=cfg.DECONV.NUM_BASIC_BLOCKS,
+                                     deconv_output_channels=cfg.DECONV.NUM_CHANNELS,
+                                     deconv_kernel_size=cfg.DECONV.KERNEL_SIZE,
+                                     cat_output=cfg.DECONV.CAT_OUTPUT)
 
         self.num_deconvs = cfg.DECONV.NUM_DECONVS
         self.deconv_config = cfg.DECONV
@@ -527,6 +720,19 @@ class PoseHigherResolutionNet(nn.Module):
 
         return nn.Sequential(*modules), num_inchannels
 
+    def transition(self, input_list, transitions):
+        # This fn adds or removes tensor branches during forward pass
+        out = []
+        x = input_list[0]
+        branch_idx = 0
+        for transition in transitions:
+            y = transition(x)
+            out.append(y)
+            branch_idx += 1
+            if branch_idx < len(input_list):
+                x = input_list[branch_idx]
+        return out
+
     def forward(self, x):
         x = self.conv1(x)
         x = self.bn1(x)
@@ -536,46 +742,73 @@ class PoseHigherResolutionNet(nn.Module):
         x = self.relu(x)
         x = self.layer1(x)
 
-        x_list = []
-        for i in range(self.stage2_cfg['NUM_BRANCHES']):
-            if self.transition1[i] is not None:
-                x_list.append(self.transition1[i](x))
-            else:
-                x_list.append(x)
-                print('none transition')
-        y_list = self.stage2(x_list)
+        y_list: List[torch.Tensor] = [x]
 
+        # x_list = self.transition(y_list, self.transition1)
         x_list = []
-        for i in range(self.stage3_cfg['NUM_BRANCHES']):
-            if self.transition2[i] is not None:
-                x_list.append(self.transition2[i](y_list[-1]))
-            else:
-                x_list.append(y_list[i])
-                print('none transition')
+        x = y_list[0]
+        branch_idx = 0
+        for transition in self.transition1:
+            y = transition(x)
+            x_list.append(y)
+            branch_idx += 1
+            if branch_idx < len(y_list):
+                x = y_list[branch_idx]
+
+        y_list: List[torch.Tensor] = self.stage2(x_list)
+
+        # x_list = self.transition(y_list, self.transition2)
+        x_list = []
+        x = y_list[0]
+        branch_idx = 0
+        for transition in self.transition2:
+            y = transition(x)
+            x_list.append(y)
+            branch_idx += 1
+            if branch_idx < len(y_list):
+                x = y_list[branch_idx]
+
         y_list = self.stage3(x_list)
 
+        # x_list = self.transition(y_list, self.transition3)
         x_list = []
-        for i in range(self.stage4_cfg['NUM_BRANCHES']):
-            if self.transition3[i] is not None:
-                x_list.append(self.transition3[i](y_list[-1]))
-            else:
-                x_list.append(y_list[i])
-                print('none transition')
+        x = y_list[0]
+        branch_idx = 0
+        for transition in self.transition3:
+            y = transition(x)
+            x_list.append(y)
+            branch_idx += 1
+            if branch_idx < len(y_list):
+                x = y_list[branch_idx]
 
         y_list = self.stage4(x_list)
 
-        final_outputs = []
+        # x = y_list[0]
+        # y = self.final_layers[0](x)
+        # final_outputs = []
+        # final_outputs.append(y)
+        #
+        # for i in range(self.num_deconvs):
+        #     if self.deconv_config.CAT_OUTPUT[i]:
+        #         x = torch.cat((x, y), 1)
+        #
+        #     x = self.deconv_layers[i](x)
+        #     y = self.final_layers[i + 1](x)
+        #     final_outputs.append(y)
+
         x = y_list[0]
-        y = self.final_layers[0](x)
-        final_outputs.append(y)
-
-        for i in range(self.num_deconvs):
-            if self.deconv_config.CAT_OUTPUT[i]:
-                x = torch.cat((x, y), 1)
-
-            x = self.deconv_layers[i](x)
-            y = self.final_layers[i + 1](x)
-            final_outputs.append(y)
+        # y = self.final_layers[0](x)
+        # final_outputs = []
+        # final_outputs.append(y)
+        #
+        # for i in range(self.num_deconvs):
+        #     if self.deconv_config.CAT_OUTPUT[i]:
+        #         x = torch.cat((x, y), 1)
+        #
+        #     x = self.deconv_layers[i](x)
+        #     y = self.final_layers[i + 1](x)
+        #     final_outputs.append(y)
+        final_outputs = self.decoder(x)
 
         # for t in enumerate(final_outputs):
         #     print(t[0], t[1].size())

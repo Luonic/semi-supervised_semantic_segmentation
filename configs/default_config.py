@@ -1,6 +1,7 @@
 from functools import partial
 import torch
 import losses
+import cv2
 
 import optimizers.ranger
 
@@ -51,7 +52,7 @@ common = dict(
     world_size=4,
     use_cpu=False,
     workers=4,
-    output_dir='runs/36_bce_pose-hrnet_crop-512_size-512_coco-pretrain',
+    output_dir='runs/37_bce_pose-hrnet_crop-512_size-512_coco-pretrain',
     num_classes=2,
     image_size=512,
 )
@@ -110,9 +111,9 @@ model = dict(model_fn=partial(get_pose_net, cfg=POSE_HIGHER_RESOLUTION_NET, is_t
 # Train params
 train = dict(
     print_freq=10,
-    batch_size_per_worker=4,
+    batch_size_per_worker=6,
     num_dataloader_workers=4,
-    base_lr=0.001 / 3,
+    base_lr=0.001 / 4 * 6,
     crop_size=512,
     gradient_clip_value=10.0,
 
@@ -148,7 +149,7 @@ train['lr_scheduler'] = partial(torch.optim.lr_scheduler.ReduceLROnPlateau,
 train['augmentations'] = ReplayCompose([
     LongestMaxSize(max_size=common['image_size'], always_apply=True),
     # SmallestMaxSize(max_size=common['image_size'], always_apply=True),
-    PadIfNeeded(min_height=common['image_size'], min_width=common['image_size'], always_apply=True),
+    PadIfNeeded(min_height=common['image_size'], min_width=common['image_size'], always_apply=True, border_mode=cv2.BORDER_CONSTANT),
     Rotate(limit=45, always_apply=True),
     # RandomResizedCrop(height=train['crop_size'], width=train['crop_size'], scale=(1.0, 1.0), ratio=(0.75, 1.33),
     #                   always_apply=True),
@@ -201,7 +202,7 @@ val = dict(
 val['augmentations'] = ReplayCompose([
     LongestMaxSize(max_size=common['image_size'], always_apply=True),
     # SmallestMaxSize(max_size=common['image_size'], always_apply=True),
-    PadIfNeeded(min_height=common['image_size'], min_width=common['image_size'], always_apply=True),
+    PadIfNeeded(min_height=common['image_size'], min_width=common['image_size'], always_apply=True, border_mode=cv2.BORDER_CONSTANT),
     ToFloat()])
 val['dataset'] = partial(dataset.SkinSegDataset,
                          dataset_dir='/home/alex/Code/instascraped/dataset_coco_no-blank',

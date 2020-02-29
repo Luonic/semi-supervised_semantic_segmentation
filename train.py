@@ -115,9 +115,3 @@ def validate(model, dataloader, epoch, initial_step, summary_writer, config, dev
         summary_writer.add_scalar('val_dice', avg_metric.average(), initial_step)
 
     return avg_loss.average(), avg_metric.average()
-
-# if train_encoder:
-#     trainable_params = model.parameters(recurse=True)
-# else:
-#     trainable_params = list(
-#         set(list(model.parameters(recurse=True))) - set(list(model.encoder.parameters(recurse=True))))

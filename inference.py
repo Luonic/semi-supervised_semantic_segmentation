@@ -23,21 +23,24 @@ latest_checkpoint_path = os.path.join(workdir, 'checkpoint.pth')
 checkpoint = torch.load(latest_checkpoint_path, map_location='cpu')
 model.load_state_dict(checkpoint['state_dict'])
 
-
 # jit_model = torch.jit.trace(model, torch.ones((1, 3, cfg['common']['image_size'], cfg['common']['image_size']), dtype=torch.float32))
-# jit_model = torch.jit.script(model)
-# torch.jit.save(jit_model, os.path.join(workdir, 'model.ts'))
+model = torch.jit.script(model)
+# torch.jit.save(model, os.path.join(workdir, 'model.ts'))
 # exit(0)
+# qconfig = torch.quantization.get_default_qconfig('fbgemm')
+# modules_to_fuse =
+# torch.quantization.fuse_modules(model, modules_to_fuse, inplace=False, fuser_func=<function fuse_known_modules>)
+
 
 model.to(device)
 
-# model = torch.quantization.quantize_dynamic(model, {torch.nn.Conv2d}, dtype=torch.qint8)
-
 # val_dataset = cfg['val']['dataset']()
 from albumentations import ReplayCompose, LongestMaxSize, SmallestMaxSize, PadIfNeeded, ToFloat
+
 augmentations = ReplayCompose([
     LongestMaxSize(max_size=cfg['common']['image_size'], always_apply=True),
-    PadIfNeeded(min_height=cfg['common']['image_size'], min_width=cfg['common']['image_size'], always_apply=True),
+    PadIfNeeded(min_height=cfg['common']['image_size'], min_width=cfg['common']['image_size'], always_apply=True,
+                border_mode=cv2.BORDER_CONSTANT),
     ToFloat()])
 val_dataset = cfg['train']['unsupervised_dataset'](augmentations=augmentations)
 val_dataloader = torch.utils.data.DataLoader(val_dataset,
@@ -47,7 +50,7 @@ val_dataloader = torch.utils.data.DataLoader(val_dataset,
                                              num_workers=1,
                                              shuffle=True)
 
-with torch.no_grad():
+with torch.no_grad(), torch.jit.optimized_execution(True):
     for sample in val_dataloader:
         image = sample['image'].to(device)
         # mask = sample['semantic_mask'].to(device, non_blocking=True)
@@ -64,7 +67,6 @@ with torch.no_grad():
         confidence = torch.nn.functional.binary_cross_entropy(pred_map, binary_mask, reduction='mean')
         print(f'Confidence: {confidence.item()}')
         skin_mask = (pred_map[0, 1].cpu().numpy() * 255).astype(np.uint8)
-
 
         numpy_image = cv2.cvtColor(np.transpose(image[0].cpu().numpy(), axes=(1, 2, 0)), cv2.COLOR_RGB2BGR)
 
