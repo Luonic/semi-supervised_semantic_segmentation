@@ -2,9 +2,9 @@ import os
 from glob import glob
 from random import shuffle
 import json
-test_size = 0.2
+test_size = 0.04
 
-dataset_dir = '/home/alex/Code/instascraped/dataset_4_no-blank'
+dataset_dir = '/home/alex/Code/instascraped/dataset_coco_2'
 part_config_path = os.path.join(dataset_dir, 'part_config.json')
 
 dir_names = [os.path.split(filename)[-1] for filename in glob(os.path.join(dataset_dir, '*')) if os.path.isdir(filename)]

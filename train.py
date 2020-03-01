@@ -7,7 +7,7 @@ import losses
 import metrics
 
 import utils.utils as utils
-
+import traceback
 
 # Write differentiable augmentations (rotations and scaling) using kornia
 # Sample randomly 2 aug params, do forward, warp preds back, calc consistency loss and do backward
@@ -43,6 +43,13 @@ def train(model, optimizer, dataloader, unsupervised_dataloader, epoch,
         mask = sample['semantic_mask'].to(device, non_blocking=True)
 
         pred_maps = model(image)
+        # try:
+        #     pred_maps = model(image)
+        # except Exception as e:
+        #     traceback.print_exc()
+        #     print(sample['filename'])
+        #     print(image.size())
+        #     continue
 
         # sup_loss += losses.dice_loss(torch.sigmoid(pred_map_sup[:, 1:]), mask[:, 1:]).mean()
         # sup_loss = ce_criterion(pred_map_sup[:, 1:], mask[:, 1:]) * 2
@@ -74,6 +81,7 @@ def train(model, optimizer, dataloader, unsupervised_dataloader, epoch,
 
 
 def validate(model, dataloader, epoch, initial_step, summary_writer, config, device):
+    print('Evaluating...')
     model.eval()
     with torch.no_grad():
         avg_loss = utils.AverageMeter()
@@ -93,7 +101,9 @@ def validate(model, dataloader, epoch, initial_step, summary_writer, config, dev
             loss = config['train']['loss'](map(lambda x: x[:, 1:], pred_maps), mask[:, 1:])
 
             pred_map_binary = (torch.sigmoid(pred_maps[-1]) > 0.5).to(pred_maps[0])
+            pred_map_binary = torch.nn.functional.interpolate(pred_map_binary, size=mask.size()[2:4], mode='nearest')
             mask_binary = (mask > 0.5).to(mask)
+
             metric = metrics.dice_metric(pred_map_binary[:, 1:], mask_binary[:, 1:]).mean()
 
             # Reduce loss from all workers

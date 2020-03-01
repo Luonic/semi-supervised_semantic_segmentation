@@ -74,7 +74,7 @@ POSE_HIGHER_RESOLUTION_NET.STAGE4.FUSE_METHOD = 'SUM'
 
 POSE_HIGHER_RESOLUTION_NET.DECONV = CN()
 POSE_HIGHER_RESOLUTION_NET.DECONV.NUM_DECONVS = 2
-POSE_HIGHER_RESOLUTION_NET.DECONV.NUM_CHANNELS = [32, 32]
+POSE_HIGHER_RESOLUTION_NET.DECONV.NUM_CHANNELS = [64, 32]
 POSE_HIGHER_RESOLUTION_NET.DECONV.NUM_BASIC_BLOCKS = 4
 POSE_HIGHER_RESOLUTION_NET.DECONV.KERNEL_SIZE = [4, 4]
 POSE_HIGHER_RESOLUTION_NET.DECONV.CAT_OUTPUT = [True, True]
@@ -91,6 +91,26 @@ def conv3x3(in_planes, out_planes, stride=1):
     return nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride,
                      padding=1, bias=False)
 
+def crop_or_pad2d(tensor, target_size):
+    _, _, tensor_h, tensor_w = tensor.size()
+    diff_h = (tensor_h - target_size[2])
+    diff_w = (tensor_w - target_size[3])
+
+    # Crop
+    if diff_h > 0 or diff_w > 0:
+        # from_h, from_w = diff_h // 2, diff_w // 2
+        # to_h = target_size[0] + from_h
+        # to_w = target_size[1] + from_w
+
+        top = torch.floor(diff_h.to(torch.float32) / 2)
+        bottom = torch.ceil(diff_h.to(torch.float32) / 2) + target_size
+        left = torch.floor(diff_w.to(torch.float32) / 2)
+        right = torch.ceil(diff_w.to(torch.float32) / 2) + target_size
+        tensor = tensor[:, :, top: bottom, left: right]
+
+    if diff_h < 0 or diff_w < 0:
+
+        nn.functional.pad(tensor, )
 
 class BasicBlock(nn.Module):
     expansion = 1
@@ -259,7 +279,8 @@ class HighResolutionModule(nn.Module):
                                   0,
                                   bias=False),
                         nn.BatchNorm2d(num_inchannels[i]),
-                        nn.Upsample(scale_factor=2 ** (j - i), mode='nearest')))
+                        # nn.Upsample(scale_factor=2 ** (j - i), mode='nearest')
+                    ))
                 elif j == i:
                     fuse_layer.append(nn.Identity())
                 else:
@@ -306,12 +327,18 @@ class HighResolutionModule(nn.Module):
 
         x_fuse = []
 
+        output_idx = 0
         for scale_fuse_layers in self.fuse_layers:
             tensors_to_fuse = []
             input_idx = 0
             for fuse_layer in scale_fuse_layers:
-                tensors_to_fuse.append(fuse_layer(x[input_idx]))
+                resized_tensor = fuse_layer(x[input_idx])
+                if resized_tensor.size() != x[output_idx].size():
+                    resized_tensor = torch.nn.functional.interpolate(resized_tensor, size=x[output_idx].size()[2:4],
+                                                                     mode='nearest')
+                tensors_to_fuse.append(resized_tensor)
                 input_idx += 1
+            output_idx += 1
 
             y = torch.stack(tensors_to_fuse, dim=0).sum(dim=0)
             x_fuse.append(self.relu(y))
@@ -363,6 +390,58 @@ class Stage(nn.Module):
         for module in self.mods:
             x = module(x)
         return x
+
+
+class Transition(nn.Module):
+    # Transition module allows you to grow or reduce number of branches
+    __constants__ = ['transition_layers']
+
+    def __init__(self, num_channels_pre_layer, num_channels_cur_layer):
+        super(Transition, self).__init__()
+        num_branches_cur = len(num_channels_cur_layer)
+        num_branches_pre = len(num_channels_pre_layer)
+
+        transition_layers = []
+        for i in range(num_branches_cur):
+            if i < num_branches_pre:
+                if num_channels_cur_layer[i] != num_channels_pre_layer[i]:
+                    transition_layers.append(nn.Sequential(
+                        nn.Conv2d(num_channels_pre_layer[i],
+                                  num_channels_cur_layer[i],
+                                  3,
+                                  1,
+                                  1,
+                                  bias=False),
+                        nn.BatchNorm2d(num_channels_cur_layer[i]),
+                        nn.ReLU(inplace=True)))
+                else:
+                    transition_layers.append(nn.Identity())
+            else:
+                conv3x3s = []
+                for j in range(i + 1 - num_branches_pre):
+                    inchannels = num_channels_pre_layer[-1]
+                    outchannels = num_channels_cur_layer[i] \
+                        if j == i - num_branches_pre else inchannels
+                    conv3x3s.append(nn.Sequential(
+                        nn.Conv2d(
+                            inchannels, outchannels, 3, 2, 1, bias=False),
+                        nn.BatchNorm2d(outchannels),
+                        nn.ReLU(inplace=True)))
+                transition_layers.append(nn.Sequential(*conv3x3s))
+
+        self.transition_layers = nn.ModuleList(transition_layers)
+
+    def forward(self, input_list: List[torch.Tensor]):
+        out = []
+        x = input_list[0]
+        branch_idx = 0
+        for transition in self.transition_layers:
+            y = transition(x)
+            out.append(y)
+            branch_idx += 1
+            if branch_idx < len(input_list):
+                x = input_list[branch_idx]
+        return out
 
 
 class HigherDecoderStage(nn.Module):
@@ -451,7 +530,6 @@ class HigherDecoder(nn.Module):
 
         prev_feature_channels = input_channels + output_channels if cat_output else input_channels
         for i in range(num_deconvs):
-
             decoder_layers.append(
                 HigherDecoderStage(input_channels=prev_feature_channels,
                                    output_channels=output_channels,
@@ -462,7 +540,8 @@ class HigherDecoder(nn.Module):
                                    deconv_kernel_size=deconv_kernel_size[i],
                                    cat_output=cat_output[i])
             )
-            prev_feature_channels = deconv_output_channels[i] + output_channels if cat_output else deconv_output_channels
+            prev_feature_channels = deconv_output_channels[
+                                        i] + output_channels if cat_output else deconv_output_channels
 
         self.decoder_layers = nn.ModuleList(decoder_layers)
 
@@ -506,7 +585,8 @@ class PoseHigherResolutionNet(nn.Module):
             num_channels[i] * block.expansion for i in range(len(num_channels))
         ]
         # TODO: Replace hardcoded 256 with calculation of number of channels based on config
-        self.transition1 = self._make_transition_layer([256], num_channels)
+        # self.transition1 = self._make_transition_layer([256], num_channels)
+        self.transition1 = Transition([256], num_channels)
         # self.stage2, pre_stage_channels = self._make_stage(
         #     self.stage2_cfg, num_channels)
         self.stage2 = Stage(self.stage2_cfg, num_channels)
@@ -518,8 +598,9 @@ class PoseHigherResolutionNet(nn.Module):
         num_channels = [
             num_channels[i] * block.expansion for i in range(len(num_channels))
         ]
-        self.transition2 = self._make_transition_layer(
-            pre_stage_channels, num_channels)
+        # self.transition2 = self._make_transition_layer(
+        #     pre_stage_channels, num_channels)
+        self.transition2 = Transition(pre_stage_channels, num_channels)
         # self.stage3, pre_stage_channels = self._make_stage(
         #     self.stage3_cfg, num_channels)
         self.stage3 = Stage(self.stage3_cfg, num_channels)
@@ -531,8 +612,9 @@ class PoseHigherResolutionNet(nn.Module):
         num_channels = [
             num_channels[i] * block.expansion for i in range(len(num_channels))
         ]
-        self.transition3 = self._make_transition_layer(
-            pre_stage_channels, num_channels)
+        # self.transition3 = self._make_transition_layer(
+        #     pre_stage_channels, num_channels)
+        self.transition3 = Transition(pre_stage_channels, num_channels)
         # self.stage4, pre_stage_channels = self._make_stage(
         #     self.stage4_cfg, num_channels, multi_scale_output=False)
         self.stage4 = Stage(self.stage4_cfg, num_channels, multi_scale_output=False)
@@ -720,19 +802,6 @@ class PoseHigherResolutionNet(nn.Module):
 
         return nn.Sequential(*modules), num_inchannels
 
-    def transition(self, input_list, transitions):
-        # This fn adds or removes tensor branches during forward pass
-        out = []
-        x = input_list[0]
-        branch_idx = 0
-        for transition in transitions:
-            y = transition(x)
-            out.append(y)
-            branch_idx += 1
-            if branch_idx < len(input_list):
-                x = input_list[branch_idx]
-        return out
-
     def forward(self, x):
         x = self.conv1(x)
         x = self.bn1(x)
@@ -744,42 +813,42 @@ class PoseHigherResolutionNet(nn.Module):
 
         y_list: List[torch.Tensor] = [x]
 
-        # x_list = self.transition(y_list, self.transition1)
-        x_list = []
-        x = y_list[0]
-        branch_idx = 0
-        for transition in self.transition1:
-            y = transition(x)
-            x_list.append(y)
-            branch_idx += 1
-            if branch_idx < len(y_list):
-                x = y_list[branch_idx]
+        x_list = self.transition1(y_list)
+        # x_list = []
+        # x = y_list[0]
+        # branch_idx = 0
+        # for transition in self.transition1:
+        #     y = transition(x)
+        #     x_list.append(y)
+        #     branch_idx += 1
+        #     if branch_idx < len(y_list):
+        #         x = y_list[branch_idx]
 
         y_list: List[torch.Tensor] = self.stage2(x_list)
 
-        # x_list = self.transition(y_list, self.transition2)
-        x_list = []
-        x = y_list[0]
-        branch_idx = 0
-        for transition in self.transition2:
-            y = transition(x)
-            x_list.append(y)
-            branch_idx += 1
-            if branch_idx < len(y_list):
-                x = y_list[branch_idx]
+        x_list = self.transition2(y_list)
+        # x_list = []
+        # x = y_list[0]
+        # branch_idx = 0
+        # for transition in self.transition2:
+        #     y = transition(x)
+        #     x_list.append(y)
+        #     branch_idx += 1
+        #     if branch_idx < len(y_list):
+        #         x = y_list[branch_idx]
 
         y_list = self.stage3(x_list)
 
-        # x_list = self.transition(y_list, self.transition3)
-        x_list = []
-        x = y_list[0]
-        branch_idx = 0
-        for transition in self.transition3:
-            y = transition(x)
-            x_list.append(y)
-            branch_idx += 1
-            if branch_idx < len(y_list):
-                x = y_list[branch_idx]
+        x_list = self.transition3(y_list)
+        # x_list = []
+        # x = y_list[0]
+        # branch_idx = 0
+        # for transition in self.transition3:
+        #     y = transition(x)
+        #     x_list.append(y)
+        #     branch_idx += 1
+        #     if branch_idx < len(y_list):
+        #         x = y_list[branch_idx]
 
         y_list = self.stage4(x_list)
 

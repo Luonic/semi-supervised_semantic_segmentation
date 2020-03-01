@@ -52,9 +52,9 @@ common = dict(
     world_size=4,
     use_cpu=False,
     workers=4,
-    output_dir='runs/37_bce_pose-hrnet_crop-512_size-512_coco-pretrain',
+    output_dir='runs/36_bce_pose-hrnet_crop-512_size-1024_coco-full_pretrain',
     num_classes=2,
-    image_size=512,
+    image_size=1024,
 )
 
 # Model params
@@ -111,9 +111,9 @@ model = dict(model_fn=partial(get_pose_net, cfg=POSE_HIGHER_RESOLUTION_NET, is_t
 # Train params
 train = dict(
     print_freq=10,
-    batch_size_per_worker=6,
+    batch_size_per_worker=4,
     num_dataloader_workers=4,
-    base_lr=0.001 / 4 * 6,
+    base_lr=0.001,
     crop_size=512,
     gradient_clip_value=10.0,
 
@@ -127,7 +127,7 @@ train['min_lr'] = train['base_lr'] * 0.001
 train['optimizer'] = partial(torch.optim.SGD,
                              lr=train['base_lr'],
                              momentum=0.9,
-                             weight_decay=0.0)
+                             weight_decay=0.0001)
 # train['optimizer'] = partial(optimizers.ranger.Ranger,
 #                              lr=train['base_lr'],
 #                              alpha=0.5,
@@ -149,15 +149,17 @@ train['lr_scheduler'] = partial(torch.optim.lr_scheduler.ReduceLROnPlateau,
 train['augmentations'] = ReplayCompose([
     LongestMaxSize(max_size=common['image_size'], always_apply=True),
     # SmallestMaxSize(max_size=common['image_size'], always_apply=True),
-    PadIfNeeded(min_height=common['image_size'], min_width=common['image_size'], always_apply=True, border_mode=cv2.BORDER_CONSTANT),
+    PadIfNeeded(min_height=train['crop_size'], min_width=train['crop_size'], always_apply=True,
+                border_mode=cv2.BORDER_CONSTANT),
     Rotate(limit=45, always_apply=True),
-    # RandomResizedCrop(height=train['crop_size'], width=train['crop_size'], scale=(1.0, 1.0), ratio=(0.75, 1.33),
-    #                   always_apply=True),
+    RandomResizedCrop(height=train['crop_size'], width=train['crop_size'], scale=(0.25, 1.0), ratio=(0.75, 1.33),
+                      always_apply=True),
+    # Resize(height=train['crop_size'], width=train['crop_size'], always_apply=True),
     HorizontalFlip(p=0.5),
-    # OneOf([
-    #     RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2),
-    #     RandomGamma(gamma_limit=(80, 120))
-    # ], p=1),
+    OneOf([
+        RandomBrightnessContrast(brightness_limit=0.1, contrast_limit=0.1),
+        # RandomGamma(gamma_limit=(80, 120))
+    ], p=1),
     ToGray(p=0.1),
     # OneOf([
     #     RGBShift(r_shift_limit=20, g_shift_limit=20, b_shift_limit=20),
@@ -186,7 +188,7 @@ train['unsupervised_augmentations'] = ReplayCompose([
                       always_apply=True),
     ToFloat()])
 train['dataset'] = partial(dataset.SkinSegDataset,
-                           dataset_dir='/home/alex/Code/instascraped/dataset_coco_no-blank',
+                           dataset_dir='/home/alex/Code/instascraped/dataset_coco_2',
                            augmentations=train['augmentations'],
                            partition=1)
 train['unsupervised_dataset'] = partial(unsupervised_dataset.UnsupervisedImagesDataset,
@@ -202,9 +204,10 @@ val = dict(
 val['augmentations'] = ReplayCompose([
     LongestMaxSize(max_size=common['image_size'], always_apply=True),
     # SmallestMaxSize(max_size=common['image_size'], always_apply=True),
-    PadIfNeeded(min_height=common['image_size'], min_width=common['image_size'], always_apply=True, border_mode=cv2.BORDER_CONSTANT),
+    # PadIfNeeded(min_height=common['image_size'], min_width=common['image_size'], always_apply=True, border_mode=cv2.BORDER_CONSTANT),
+    # PadIfNeeded(min_height=train['crop_size'], min_width=train['crop_size'], border_mode=cv2.BORDER_CONSTANT, always_apply=True),
     ToFloat()])
 val['dataset'] = partial(dataset.SkinSegDataset,
-                         dataset_dir='/home/alex/Code/instascraped/dataset_coco_no-blank',
+                         dataset_dir='/home/alex/Code/instascraped/dataset_coco_2',
                          augmentations=val['augmentations'],
                          partition=0)

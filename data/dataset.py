@@ -50,7 +50,8 @@ class SkinSegDataset(torch.utils.data.Dataset):
         self.augmentations = augmentations
 
     def __getitem__(self, item):
-        image = cv2.cvtColor(cv2.imread(self.filenames[item], cv2.IMREAD_COLOR), cv2.COLOR_BGR2RGB)
+        image_filename = self.filenames[item]
+        image = cv2.cvtColor(cv2.imread(image_filename, cv2.IMREAD_COLOR), cv2.COLOR_BGR2RGB)
         mask_filenames = glob(os.path.join(os.path.dirname(self.filenames[item]), '*.png'))
         semantic_mask = np.zeros(shape=(len(self.class2idx.keys()), image.shape[0], image.shape[1]), dtype=np.float32)
         for file_path in mask_filenames:
@@ -81,7 +82,8 @@ class SkinSegDataset(torch.utils.data.Dataset):
         semantic_mask = torch.from_numpy(semantic_mask)
 
         sample = {'image': image,
-                  'semantic_mask': semantic_mask}
+                  'semantic_mask': semantic_mask,
+                  'filename': image_filename}
         return sample
 
     def __len__(self):
@@ -152,10 +154,11 @@ if __name__ == '__main__':
     #     # ], p=0.8),
     #     ToFloat()
     # ])
-    dataset = SkinSegDataset(dataset_dir='/home/alex/Code/instascraped/dataset_coco_no-blank',
+    dataset = SkinSegDataset(dataset_dir='/home/alex/Code/instascraped/dataset_coco_2',
                              augmentations=augmentations,
-                             partition=0)
-    for sample in dataset:
+                             partition=1)
+    from tqdm import tqdm
+    for sample in tqdm(dataset):
         image = sample['image']
         mask = sample['semantic_mask']
 
@@ -164,6 +167,10 @@ if __name__ == '__main__':
 
         cv2.imshow('skin', numpy_mask[:, :, 1])
         cv2.imshow('image', cv2.cvtColor(numpy_image, cv2.COLOR_RGB2BGR))
-        print('mask', mask)
-        print('image', image)
-        cv2.waitKey(0)
+
+        # print('mask', mask)
+        # print('image', image)
+        if min(image.shape[1:3]) < dcfg.train['crop_size']:
+            print(sample['filename'])
+            print(image.shape)
+        cv2.waitKey(1)
