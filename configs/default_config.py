@@ -52,7 +52,7 @@ common = dict(
     world_size=4,
     use_cpu=False,
     workers=4,
-    output_dir='runs/36_bce_pose-hrnet_crop-512_size-1024_coco-full_pretrain',
+    output_dir='runs/38_bce_my-hrnet_crop-512_size-512_coco-no-blank_pretrain',
     num_classes=2,
     image_size=1024,
 )
@@ -111,9 +111,9 @@ model = dict(model_fn=partial(get_pose_net, cfg=POSE_HIGHER_RESOLUTION_NET, is_t
 # Train params
 train = dict(
     print_freq=10,
-    batch_size_per_worker=4,
+    batch_size_per_worker=5,
     num_dataloader_workers=4,
-    base_lr=0.001,
+    base_lr=0.004,
     crop_size=512,
     gradient_clip_value=10.0,
 
@@ -151,7 +151,7 @@ train['augmentations'] = ReplayCompose([
     # SmallestMaxSize(max_size=common['image_size'], always_apply=True),
     PadIfNeeded(min_height=train['crop_size'], min_width=train['crop_size'], always_apply=True,
                 border_mode=cv2.BORDER_CONSTANT),
-    Rotate(limit=45, always_apply=True),
+    # Rotate(limit=45, always_apply=True),
     RandomResizedCrop(height=train['crop_size'], width=train['crop_size'], scale=(0.25, 1.0), ratio=(0.75, 1.33),
                       always_apply=True),
     # Resize(height=train['crop_size'], width=train['crop_size'], always_apply=True),
@@ -188,7 +188,7 @@ train['unsupervised_augmentations'] = ReplayCompose([
                       always_apply=True),
     ToFloat()])
 train['dataset'] = partial(dataset.SkinSegDataset,
-                           dataset_dir='/home/alex/Code/instascraped/dataset_coco_2',
+                           dataset_dir='/home/alex/Code/instascraped/dataset_coco_no-blank',
                            augmentations=train['augmentations'],
                            partition=1)
 train['unsupervised_dataset'] = partial(unsupervised_dataset.UnsupervisedImagesDataset,
@@ -208,6 +208,6 @@ val['augmentations'] = ReplayCompose([
     # PadIfNeeded(min_height=train['crop_size'], min_width=train['crop_size'], border_mode=cv2.BORDER_CONSTANT, always_apply=True),
     ToFloat()])
 val['dataset'] = partial(dataset.SkinSegDataset,
-                         dataset_dir='/home/alex/Code/instascraped/dataset_coco_2',
+                         dataset_dir='/home/alex/Code/instascraped/dataset_coco_no-blank',
                          augmentations=val['augmentations'],
                          partition=0)

@@ -81,7 +81,6 @@ def train(model, optimizer, dataloader, unsupervised_dataloader, epoch,
 
 
 def validate(model, dataloader, epoch, initial_step, summary_writer, config, device):
-    print('Evaluating...')
     model.eval()
     with torch.no_grad():
         avg_loss = utils.AverageMeter()
@@ -90,6 +89,9 @@ def validate(model, dataloader, epoch, initial_step, summary_writer, config, dev
         rank = torch.distributed.get_rank()
         world_size = torch.distributed.get_world_size()
         tic = time.time()
+
+        if rank == 0:
+            print('Evaluating...')
 
         for sample in dataloader:
             image = sample['image'].to(device)

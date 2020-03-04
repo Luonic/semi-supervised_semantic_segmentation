@@ -33,7 +33,7 @@ def distributed_train(rank, cfg_path):
     if device != 'cpu':
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
     device_ids = [device] if device != 'cpu' else None
-    model = torch.nn.parallel.DistributedDataParallel(model, device_ids=device_ids, find_unused_parameters=False)
+    model = torch.nn.parallel.DistributedDataParallel(model, device_ids=device_ids, find_unused_parameters=True)
 
     # trainable_params = utils.get_trainable_params(model.module.decoder) + utils.get_trainable_params(model.module.final_block)
     trainable_params = utils.get_trainable_params(model)

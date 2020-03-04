@@ -154,7 +154,7 @@ if __name__ == '__main__':
     #     # ], p=0.8),
     #     ToFloat()
     # ])
-    dataset = SkinSegDataset(dataset_dir='/home/alex/Code/instascraped/dataset_coco_2',
+    dataset = SkinSegDataset(dataset_dir='/home/alex/Code/instascraped/dataset_coco_no-blank',
                              augmentations=augmentations,
                              partition=1)
     from tqdm import tqdm
@@ -170,7 +170,7 @@ if __name__ == '__main__':
 
         # print('mask', mask)
         # print('image', image)
-        if min(image.shape[1:3]) < dcfg.train['crop_size']:
-            print(sample['filename'])
-            print(image.shape)
-        cv2.waitKey(1)
+        # if min(image.shape[1:3]) < dcfg.train['crop_size']:
+        #     print(sample['filename'])
+        #     print(image.shape)
+        cv2.waitKey(0)

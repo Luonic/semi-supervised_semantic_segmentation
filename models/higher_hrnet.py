@@ -5,18 +5,8 @@
 # Modified by Bowen Cheng (bcheng9@illinois.edu)
 # ------------------------------------------------------------------------------
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
-import os
 import logging
-
-import math
+import os
 
 import torch
 import torch.nn as nn
@@ -28,7 +18,7 @@ except:
     # polyfill from `torch.jit`.
     from torch.jit import Final
 
-from typing import List, Tuple
+from typing import List
 
 from yacs.config import CfgNode as CN
 
@@ -53,23 +43,23 @@ POSE_HIGHER_RESOLUTION_NET.STAGE2.NUM_MODULES = 1
 POSE_HIGHER_RESOLUTION_NET.STAGE2.NUM_BRANCHES = 2
 POSE_HIGHER_RESOLUTION_NET.STAGE2.NUM_BLOCKS = [4, 4]
 POSE_HIGHER_RESOLUTION_NET.STAGE2.NUM_CHANNELS = [24, 48]
-POSE_HIGHER_RESOLUTION_NET.STAGE2.BLOCK = 'BOTTLENECK'
+POSE_HIGHER_RESOLUTION_NET.STAGE2.BLOCK = 'BASIC'
 POSE_HIGHER_RESOLUTION_NET.STAGE2.FUSE_METHOD = 'SUM'
 
 POSE_HIGHER_RESOLUTION_NET.STAGE3 = CN()
-POSE_HIGHER_RESOLUTION_NET.STAGE3.NUM_MODULES = 1
+POSE_HIGHER_RESOLUTION_NET.STAGE3.NUM_MODULES = 4
 POSE_HIGHER_RESOLUTION_NET.STAGE3.NUM_BRANCHES = 3
 POSE_HIGHER_RESOLUTION_NET.STAGE3.NUM_BLOCKS = [4, 4, 4]
 POSE_HIGHER_RESOLUTION_NET.STAGE3.NUM_CHANNELS = [24, 48, 92]
-POSE_HIGHER_RESOLUTION_NET.STAGE3.BLOCK = 'BOTTLENECK'
+POSE_HIGHER_RESOLUTION_NET.STAGE3.BLOCK = 'BASIC'
 POSE_HIGHER_RESOLUTION_NET.STAGE3.FUSE_METHOD = 'SUM'
 
 POSE_HIGHER_RESOLUTION_NET.STAGE4 = CN()
-POSE_HIGHER_RESOLUTION_NET.STAGE4.NUM_MODULES = 1
+POSE_HIGHER_RESOLUTION_NET.STAGE4.NUM_MODULES = 3
 POSE_HIGHER_RESOLUTION_NET.STAGE4.NUM_BRANCHES = 4
 POSE_HIGHER_RESOLUTION_NET.STAGE4.NUM_BLOCKS = [4, 4, 4, 4]
 POSE_HIGHER_RESOLUTION_NET.STAGE4.NUM_CHANNELS = [24, 48, 92, 192]
-POSE_HIGHER_RESOLUTION_NET.STAGE4.BLOCK = 'BOTTLENECK'
+POSE_HIGHER_RESOLUTION_NET.STAGE4.BLOCK = 'BASIC'
 POSE_HIGHER_RESOLUTION_NET.STAGE4.FUSE_METHOD = 'SUM'
 
 POSE_HIGHER_RESOLUTION_NET.DECONV = CN()
@@ -91,6 +81,7 @@ def conv3x3(in_planes, out_planes, stride=1):
     return nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride,
                      padding=1, bias=False)
 
+
 def crop_or_pad2d(tensor, target_size):
     _, _, tensor_h, tensor_w = tensor.size()
     diff_h = (tensor_h - target_size[2])
@@ -109,8 +100,8 @@ def crop_or_pad2d(tensor, target_size):
         tensor = tensor[:, :, top: bottom, left: right]
 
     if diff_h < 0 or diff_w < 0:
-
         nn.functional.pad(tensor, )
+
 
 class BasicBlock(nn.Module):
     expansion = 1
@@ -119,33 +110,46 @@ class BasicBlock(nn.Module):
         super(BasicBlock, self).__init__()
         self.conv1 = conv3x3(inplanes, planes, stride)
         self.bn1 = nn.BatchNorm2d(planes, momentum=BN_MOMENTUM)
-        self.relu = nn.ReLU(inplace=True)
+        self.relu1 = nn.ReLU(inplace=True)
         self.conv2 = conv3x3(planes, planes)
         self.bn2 = nn.BatchNorm2d(planes, momentum=BN_MOMENTUM)
         self.downsample = downsample if downsample is not None else torch.nn.Identity()
         self.stride = stride
+        self.skip_add = nn.quantized.FloatFunctional()
+        self.relu3 = nn.ReLU(inplace=True)
+
+    def fuse(self):
+        torch.quantization.fuse_modules(self,
+                                        [
+                                            ['conv1', 'bn1', 'relu1'],
+                                            ['conv2', 'bn2']
+                                        ],
+                                        inplace=True)
+
 
     def forward(self, x):
         residual = self.downsample(x)
 
         out = self.conv1(x)
         out = self.bn1(out)
-        out = self.relu(out)
+        out = self.relu1(out)
 
         out = self.conv2(out)
         out = self.bn2(out)
 
-        out += residual
-        out = self.relu(out)
+        out = self.skip_add.add(out, residual)
+        out = self.relu3(out)
 
         return out
 
 
-class Bottleneck(nn.Module):
+class BottleneckBlock(nn.Module):
     expansion = 4
 
     def __init__(self, inplanes, planes, stride=1, downsample=None):
-        super(Bottleneck, self).__init__()
+        # inplanes: num channels in input tensor
+        # planes: num channels in bottleneck
+        super(BottleneckBlock, self).__init__()
         self.conv1 = nn.Conv2d(inplanes, planes, kernel_size=1, bias=False)
         self.bn1 = nn.BatchNorm2d(planes, momentum=BN_MOMENTUM)
         self.conv2 = nn.Conv2d(planes, planes, kernel_size=3, stride=stride,
@@ -158,6 +162,15 @@ class Bottleneck(nn.Module):
         self.relu = nn.ReLU(inplace=True)
         self.downsample = downsample if downsample is not None else torch.nn.Identity()
         self.stride = stride
+
+    def get_modules_to_fuse(self):
+        torch.quantization.fuse_modules(self,
+                                        [
+                                            [self.conv1, self.bn1, self.relu],
+                                            [self.conv2, self.bn2, self.relu],
+                                            [self.conv3, self.bn3]
+                                        ],
+                                        inplace=True)
 
     def forward(self, x):
         residual = self.downsample(x)
@@ -175,29 +188,30 @@ class Bottleneck(nn.Module):
 
         out += residual
         out = self.relu(out)
-
         return out
 
 
 class HighResolutionModule(nn.Module):
     # This module builds num_branches of conv layers for each resolution and
     # builds fuse layers to allow branches exchange information
-    def __init__(self, num_branches, blocks, num_blocks, num_inchannels,
-                 num_channels, fuse_method, multi_scale_output=True):
+    def __init__(self,
+                 num_in_channels,
+                 num_out_channels,
+                 num_blocks,
+                 block,
+                 fuse_method):
         super(HighResolutionModule, self).__init__()
-        self._check_branches(
-            num_branches, blocks, num_blocks, num_inchannels, num_channels)
+        # self._check_branches(num_branches=, blocks, num_blocks, num_inchannels, num_channels)
 
-        self.num_inchannels = num_inchannels
+        self.num_in_channels = num_in_channels
+        self.num_out_channels = num_out_channels
         self.fuse_method = fuse_method
-        self.num_branches = num_branches
+        self.num_branches = len(num_out_channels)
 
-        self.multi_scale_output = multi_scale_output
-
-        self.branches: Final = self._make_branches(
-            num_branches, blocks, num_blocks, num_channels)
-        self.fuse_layers: Final = self._make_fuse_layers()
+        # self.fuse_layers: Final = self._make_fuse_layers()
         self.relu = nn.ReLU(True)
+        self.fuse_module = TransitionFuse(num_in_channels, num_out_channels)
+        self.branches: Final = self._make_branches(self.num_branches, block, num_blocks, num_out_channels)
 
     def _check_branches(self, num_branches, blocks, num_blocks,
                         num_inchannels, num_channels):
@@ -219,29 +233,11 @@ class HighResolutionModule(nn.Module):
             logger.error(error_msg)
             raise ValueError(error_msg)
 
-    def _make_one_branch(self, branch_index, block, num_blocks, num_channels,
-                         stride=1):
-
-        if stride != 1 or \
-                self.num_inchannels[branch_index] != num_channels[branch_index] * block.expansion:
-            downsample = nn.Sequential(
-                nn.Conv2d(self.num_inchannels[branch_index],
-                          num_channels[branch_index] * block.expansion,
-                          kernel_size=1, stride=stride, bias=False),
-                nn.BatchNorm2d(num_channels[branch_index] * block.expansion,
-                               momentum=BN_MOMENTUM),
-            )
-        else:
-            downsample = None
-
+    def _make_one_branch(self, block, num_blocks, num_channels):
         layers = []
-        layers.append(block(self.num_inchannels[branch_index],
-                            num_channels[branch_index], stride, downsample))
-        self.num_inchannels[branch_index] = \
-            num_channels[branch_index] * block.expansion
-        for i in range(1, num_blocks[branch_index]):
-            layers.append(block(self.num_inchannels[branch_index],
-                                num_channels[branch_index]))
+        num_in_channels = num_channels * block.expansion
+        for i in range(0, num_blocks):
+            layers.append(block(num_in_channels, num_channels))
 
         return nn.Sequential(*layers)
 
@@ -250,9 +246,9 @@ class HighResolutionModule(nn.Module):
         # responsible for processing specific single scale
         branches = []
 
-        for i in range(num_branches):
-            branches.append(
-                self._make_one_branch(i, block, num_blocks, num_channels))
+        for branch_index in range(num_branches):
+            branches.append(self._make_one_branch(block, num_blocks[branch_index],
+                                                  num_channels[branch_index] // block.expansion))
 
         return nn.ModuleList(branches)
 
@@ -307,23 +303,139 @@ class HighResolutionModule(nn.Module):
         return nn.ModuleList(fuse_layers)
 
     def get_num_inchannels(self):
-        return self.num_inchannels
+        return self.num_in_channels
 
     def forward(self, x: List[torch.Tensor]):
-        # if self.num_branches == 1:
-        #     return [self.branches[0](x[0])]
+        x = self.fuse_module(x)
 
-        # for i in range(self.num_branches):
-        #     x[i] = self.branches[i](x[i])
-
-        # out = []
         branch_idx = 0
         for branch_module in self.branches:
             x[branch_idx] = branch_module(x[branch_idx])
             branch_idx += 1
 
-        if self.num_branches == 1:
-            return x
+        # if self.num_branches == 1:
+        #     return x
+        #
+        # x_fuse = []
+        #
+        # output_idx = 0
+        # for scale_fuse_layers in self.fuse_layers:
+        #     tensors_to_fuse = []
+        #     input_idx = 0
+        #     for fuse_layer in scale_fuse_layers:
+        #         resized_tensor = fuse_layer(x[input_idx])
+        #         if resized_tensor.size() != x[output_idx].size():
+        #             resized_tensor = torch.nn.functional.interpolate(resized_tensor, size=x[output_idx].size()[2:4],
+        #                                                              mode='nearest')
+        #         tensors_to_fuse.append(resized_tensor)
+        #         input_idx += 1
+        #     output_idx += 1
+        #
+        #     y = torch.stack(tensors_to_fuse, dim=0).sum(dim=0)
+        #     x_fuse.append(self.relu(y))
+        #
+        # return x_fuse
+        return x
+
+
+blocks_dict = {
+    'BASIC': BasicBlock,
+    'BOTTLENECK': BottleneckBlock
+}
+
+
+class Stage(nn.Module):
+    __constants__ = ['mods']
+
+    def __init__(self, num_in_channels, num_out_channels, num_modules, num_blocks, block, fuse_method):
+        super(Stage, self).__init__()
+
+        modules = []
+        for i in range(num_modules):
+            modules.append(
+                HighResolutionModule(
+                    num_in_channels,
+                    num_out_channels,
+                    num_blocks,
+                    block,
+                    fuse_method)
+            )
+        self.num_out_channels = [num_channels * block.expansion for num_channels in num_out_channels]
+        self.mods = nn.ModuleList(modules)
+
+    def forward(self, input: List[torch.Tensor]):
+        x = input
+        for module in self.mods:
+            x = module(x)
+        return x
+
+
+class TransitionFuse(nn.Module):
+    __constants__ = ['fuse_layers']
+
+    def __init__(self, num_in_channels, num_out_channels):
+        # num_in_channels is a list of input depth for each resolution
+        # num_out_channels is a list of output depth for each resolution
+        super(TransitionFuse, self).__init__()
+
+        fuse_layers = []
+        # `i` is output branch idx
+        # `j` is input branch idx
+        # branch 0 is largest resolution
+        for i in range(len(num_out_channels)):
+            fuse_layer = []
+            for j in range(len(num_in_channels)):
+                if j > i:
+                    # Upsample smaller scale
+                    fuse_layer.append(nn.Sequential(
+                        nn.Conv2d(num_in_channels[j],
+                                  num_out_channels[i],
+                                  1,
+                                  1,
+                                  0,
+                                  bias=False),
+                        nn.BatchNorm2d(num_out_channels[i]),
+                        # nn.Upsample(scale_factor=2 ** (j - i), mode='nearest')
+                    ))
+                elif j == i:
+                    # Same resolution
+                    # Add conv+bn if num of channels changed
+                    if num_in_channels[j] == num_out_channels[i]:
+                        fuse_layer.append(nn.Identity())
+                    else:
+                        fuse_layer.append(nn.Sequential(
+                            nn.Conv2d(num_in_channels[j],
+                                      num_out_channels[i],
+                                      1,
+                                      1,
+                                      0,
+                                      bias=False),
+                            nn.BatchNorm2d(num_out_channels[i])))
+                else:
+                    conv3x3s = []
+                    for k in range(j, i):
+                        if k == i - 1:
+                            # Last layer of subsampling branch
+                            conv3x3s.append(nn.Sequential(
+                                nn.Conv2d(num_in_channels[k],
+                                          num_out_channels[k + 1],
+                                          3, 2, 1, bias=False),
+                                nn.BatchNorm2d(num_out_channels[k + 1])))
+                        else:
+                            # Intermediate layer of subsampling branch
+                            conv3x3s.append(nn.Sequential(
+                                nn.Conv2d(num_in_channels[k],
+                                          num_in_channels[k + 1],
+                                          3, 2, 1, bias=False),
+                                nn.BatchNorm2d(num_in_channels[k + 1]),
+                                nn.ReLU(True)))
+                    fuse_layer.append(nn.Sequential(*conv3x3s))
+            fuse_layers.append(nn.ModuleList(fuse_layer))
+
+        self.fuse_layers = nn.ModuleList(fuse_layers)
+
+    def forward(self, input: List[torch.Tensor]):
+        # input: list of tensors of different resolution
 
         x_fuse = []
 
@@ -332,64 +444,20 @@ class HighResolutionModule(nn.Module):
             tensors_to_fuse = []
             input_idx = 0
             for fuse_layer in scale_fuse_layers:
-                resized_tensor = fuse_layer(x[input_idx])
-                if resized_tensor.size() != x[output_idx].size():
-                    resized_tensor = torch.nn.functional.interpolate(resized_tensor, size=x[output_idx].size()[2:4],
-                                                                     mode='nearest')
+                resized_tensor = fuse_layer(input[input_idx])
+                if output_idx <= input_idx and resized_tensor.size() != input[output_idx].size():
+                    resized_tensor = torch.nn.functional.interpolate(resized_tensor,
+                                                                     size=input[output_idx].size()[2:4],
+                                                                     mode='bilinear',
+                                                                     align_corners=True)
                 tensors_to_fuse.append(resized_tensor)
                 input_idx += 1
             output_idx += 1
 
             y = torch.stack(tensors_to_fuse, dim=0).sum(dim=0)
-            x_fuse.append(self.relu(y))
+            x_fuse.append(torch.nn.functional.relu(y, inplace=True))
 
         return x_fuse
-
-
-blocks_dict = {
-    'BASIC': BasicBlock,
-    'BOTTLENECK': Bottleneck
-}
-
-
-class Stage(nn.Module):
-    __constants__ = ['mods']
-
-    def __init__(self, layer_config, num_inchannels, multi_scale_output=True):
-        super(Stage, self).__init__()
-        num_modules = layer_config['NUM_MODULES']
-        num_branches = layer_config['NUM_BRANCHES']
-        num_blocks = layer_config['NUM_BLOCKS']
-        num_channels = layer_config['NUM_CHANNELS']
-        block = blocks_dict[layer_config['BLOCK']]
-        fuse_method = layer_config['FUSE_METHOD']
-
-        modules = []
-        for i in range(num_modules):
-            # multi_scale_output is only used last module
-            if not multi_scale_output and i == num_modules - 1:
-                reset_multi_scale_output = False
-            else:
-                reset_multi_scale_output = True
-
-            modules.append(
-                HighResolutionModule(
-                    num_branches,
-                    block,
-                    num_blocks,
-                    num_inchannels,
-                    num_channels,
-                    fuse_method,
-                    reset_multi_scale_output)
-            )
-            self.num_inchannels = modules[-1].get_num_inchannels()
-            self.mods = nn.ModuleList(modules)
-
-    def forward(self, input: List[torch.Tensor]):
-        x = input
-        for module in self.mods:
-            x = module(x)
-        return x
 
 
 class Transition(nn.Module):
@@ -442,6 +510,22 @@ class Transition(nn.Module):
             if branch_idx < len(input_list):
                 x = input_list[branch_idx]
         return out
+
+
+class HighResolutionMultiscaleAggregator(nn.Module):
+    def __init__(self):
+        super(HighResolutionMultiscaleAggregator, self).__init__()
+
+    def forward(self, input: List[torch.Tensor]):
+        tgt_size = input[0].size()[2:4]
+
+        resized_list = []
+        for scale_tensor in input:
+            resized_list.append(torch.nn.functional.interpolate(scale_tensor, tgt_size, mode='bilinear',
+                                                                align_corners=True))
+
+        output = torch.cat(resized_list, dim=1)
+        return output
 
 
 class HigherDecoderStage(nn.Module):
@@ -555,14 +639,7 @@ class HigherDecoder(nn.Module):
 
 
 class PoseHigherResolutionNet(nn.Module):
-    # stage2: Final[nn.Sequential]
-    # stage3: Final[nn.Sequential]
-    # stage4: Final[nn.Sequential]
-    # transition1: Final[nn.ModuleList]
-    # transition2: Final[nn.ModuleList]
-    # transition3: Final[nn.ModuleList]
-
-    __constants__ = ['stage2', 'stage3', 'stage4', 'transition1', 'transition2', 'transition3']
+    __constants__ = ['stage2', 'stage3', 'stage4']
 
     def __init__(self, cfg, **kwargs):
         self.inplanes = 64
@@ -576,55 +653,82 @@ class PoseHigherResolutionNet(nn.Module):
                                bias=False)
         self.bn2 = nn.BatchNorm2d(64, momentum=BN_MOMENTUM)
         self.relu = nn.ReLU(inplace=True)
-        self.layer1 = self._make_layer(Bottleneck, 64, 4)
+        self.layer1 = self._make_layer(BottleneckBlock, 64, 4)
 
         self.stage2_cfg = cfg['STAGE2']
         num_channels = self.stage2_cfg['NUM_CHANNELS']
         block = blocks_dict[self.stage2_cfg['BLOCK']]
+
+        num_modules = self.stage2_cfg['NUM_MODULES']
+        num_blocks = self.stage2_cfg['NUM_BLOCKS']
+        num_channels = self.stage2_cfg['NUM_CHANNELS']
+        block = blocks_dict[self.stage2_cfg['BLOCK']]
+        fuse_method = self.stage2_cfg['FUSE_METHOD']
         num_channels = [
             num_channels[i] * block.expansion for i in range(len(num_channels))
         ]
         # TODO: Replace hardcoded 256 with calculation of number of channels based on config
-        # self.transition1 = self._make_transition_layer([256], num_channels)
-        self.transition1 = Transition([256], num_channels)
-        # self.stage2, pre_stage_channels = self._make_stage(
-        #     self.stage2_cfg, num_channels)
-        self.stage2 = Stage(self.stage2_cfg, num_channels)
-        pre_stage_channels = self.stage2.num_inchannels
+        # self.transition1 = Transition([256], num_channels)
+        # self.stage2 = Stage(self.stage2_cfg, num_channels)
+        self.stage2 = Stage(num_in_channels=[256],
+                            num_out_channels=num_channels,
+                            num_modules=num_modules,
+                            num_blocks=num_blocks,
+                            block=block,
+                            fuse_method=fuse_method)
+        # pre_stage_channels = self.stage2.num_inchannels
+        pre_stage_channels = num_channels
 
         self.stage3_cfg = cfg['STAGE3']
         num_channels = self.stage3_cfg['NUM_CHANNELS']
         block = blocks_dict[self.stage3_cfg['BLOCK']]
+
+        num_modules = self.stage3_cfg['NUM_MODULES']
+        num_blocks = self.stage3_cfg['NUM_BLOCKS']
+        num_channels = self.stage3_cfg['NUM_CHANNELS']
+        block = blocks_dict[self.stage3_cfg['BLOCK']]
+        fuse_method = self.stage3_cfg['FUSE_METHOD']
         num_channels = [
             num_channels[i] * block.expansion for i in range(len(num_channels))
         ]
-        # self.transition2 = self._make_transition_layer(
-        #     pre_stage_channels, num_channels)
-        self.transition2 = Transition(pre_stage_channels, num_channels)
-        # self.stage3, pre_stage_channels = self._make_stage(
-        #     self.stage3_cfg, num_channels)
-        self.stage3 = Stage(self.stage3_cfg, num_channels)
-        pre_stage_channels = self.stage3.num_inchannels
+        # self.transition2 = Transition(pre_stage_channels, num_channels)
+        # self.stage3 = Stage(self.stage3_cfg, num_channels)
+        self.stage3 = Stage(num_in_channels=pre_stage_channels,
+                            num_out_channels=num_channels,
+                            num_modules=num_modules,
+                            num_blocks=num_blocks,
+                            block=block,
+                            fuse_method=fuse_method)
+        # pre_stage_channels = self.stage3.num_inchannels
+        pre_stage_channels = num_channels
 
         self.stage4_cfg = cfg['STAGE4']
         num_channels = self.stage4_cfg['NUM_CHANNELS']
         block = blocks_dict[self.stage4_cfg['BLOCK']]
+
+        num_modules = self.stage4_cfg['NUM_MODULES']
+        num_blocks = self.stage4_cfg['NUM_BLOCKS']
+        num_channels = self.stage4_cfg['NUM_CHANNELS']
+        block = blocks_dict[self.stage4_cfg['BLOCK']]
+        fuse_method = self.stage4_cfg['FUSE_METHOD']
         num_channels = [
             num_channels[i] * block.expansion for i in range(len(num_channels))
         ]
-        # self.transition3 = self._make_transition_layer(
-        #     pre_stage_channels, num_channels)
-        self.transition3 = Transition(pre_stage_channels, num_channels)
-        # self.stage4, pre_stage_channels = self._make_stage(
-        #     self.stage4_cfg, num_channels, multi_scale_output=False)
-        self.stage4 = Stage(self.stage4_cfg, num_channels, multi_scale_output=False)
-        pre_stage_channels = self.stage4.num_inchannels
+        # self.transition3 = Transition(pre_stage_channels, num_channels)
+        # self.stage4 = Stage(self.stage4_cfg, num_channels, multi_scale_output=False)
+        self.stage4 = Stage(num_in_channels=pre_stage_channels,
+                            num_out_channels=num_channels,
+                            num_modules=num_modules,
+                            num_blocks=num_blocks,
+                            block=block,
+                            fuse_method=fuse_method)
+        # pre_stage_channels = self.stage4.num_inchannels
+        pre_stage_channels = num_channels
 
-        # self.final_layers = self._make_final_layers(cfg, pre_stage_channels[0])
-        # self.deconv_layers = self._make_deconv_layers(
-        #     cfg, pre_stage_channels[0])
+        self.final_aggregation = TransitionFuse(pre_stage_channels, num_channels)
+        self.multires_aggregation = HighResolutionMultiscaleAggregator()
 
-        self.decoder = HigherDecoder(input_channels=pre_stage_channels[0],
+        self.decoder = HigherDecoder(input_channels=sum(pre_stage_channels),
                                      output_channels=cfg.NUM_JOINTS,
                                      final_kernel_size=cfg.FINAL_CONV_KERNEL,
                                      num_deconvs=cfg.NUM_JOINTS,
@@ -633,126 +737,42 @@ class PoseHigherResolutionNet(nn.Module):
                                      deconv_kernel_size=cfg.DECONV.KERNEL_SIZE,
                                      cat_output=cfg.DECONV.CAT_OUTPUT)
 
-        self.num_deconvs = cfg.DECONV.NUM_DECONVS
-        self.deconv_config = cfg.DECONV
-        self.loss_config = cfg.LOSS
+    def forward(self, x):
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.conv2(x)
+        x = self.bn2(x)
+        x = self.relu(x)
+        x = self.layer1(x)
 
-        self.pretrained_layers = cfg['PRETRAINED_LAYERS']
+        y_list: List[torch.Tensor] = [x]
 
-    def _make_final_layers(self, cfg, input_channels):
-        dim_tag = cfg.NUM_JOINTS if cfg.TAG_PER_JOINT else 1
+        # x_list = self.transition1(y_list)
+        x_list = y_list
+        y_list = self.stage2(x_list)
 
-        final_layers = []
-        output_channels = cfg.NUM_JOINTS + dim_tag \
-            if cfg.LOSS.WITH_AE_LOSS[0] else cfg.NUM_JOINTS
-        final_layers.append(nn.Conv2d(
-            in_channels=input_channels,
-            out_channels=output_channels,
-            kernel_size=cfg.FINAL_CONV_KERNEL,
-            stride=1,
-            padding=1 if cfg.FINAL_CONV_KERNEL == 3 else 0
-        ))
+        # x_list = self.transition2(y_list)
+        x_list = y_list
+        y_list = self.stage3(x_list)
 
-        deconv_cfg = cfg.DECONV
-        for i in range(deconv_cfg.NUM_DECONVS):
-            input_channels = deconv_cfg.NUM_CHANNELS[i]
-            output_channels = cfg.NUM_JOINTS + dim_tag \
-                if cfg.LOSS.WITH_AE_LOSS[i + 1] else cfg.NUM_JOINTS
-            final_layers.append(nn.Conv2d(
-                in_channels=input_channels,
-                out_channels=output_channels,
-                kernel_size=cfg.FINAL_CONV_KERNEL,
-                stride=1,
-                padding=1 if cfg.FINAL_CONV_KERNEL == 3 else 0
-            ))
+        # x_list = self.transition3(y_list)
+        x_list = y_list
+        y_list = self.stage4(x_list)
 
-        return nn.ModuleList(final_layers)
+        y_list = self.final_aggregation(y_list)
 
-    def _make_deconv_layers(self, cfg, input_channels):
-        dim_tag = cfg.NUM_JOINTS if cfg.TAG_PER_JOINT else 1
-        deconv_cfg = cfg.DECONV
+        x = self.multires_aggregation(y_list)
+        final_outputs = self.decoder(x)
+        return final_outputs
 
-        deconv_layers = []
-        for i in range(deconv_cfg.NUM_DECONVS):
-            if deconv_cfg.CAT_OUTPUT[i]:
-                final_output_channels = cfg.NUM_JOINTS + dim_tag \
-                    if cfg.LOSS.WITH_AE_LOSS[i] else cfg.NUM_JOINTS
-                input_channels += final_output_channels
-            output_channels = deconv_cfg.NUM_CHANNELS[i]
-            deconv_kernel, padding, output_padding = \
-                self._get_deconv_cfg(deconv_cfg.KERNEL_SIZE[i])
+    def fuse_model(self):
+        def fuse_fn(m):
+            if hasattr(m, 'fuse') and callable(m.fuse):
+                m.fuse()
 
-            layers = []
-            layers.append(nn.Sequential(
-                nn.ConvTranspose2d(
-                    in_channels=input_channels,
-                    out_channels=output_channels,
-                    kernel_size=deconv_kernel,
-                    stride=2,
-                    padding=padding,
-                    output_padding=output_padding,
-                    bias=False),
-                nn.BatchNorm2d(output_channels, momentum=BN_MOMENTUM),
-                nn.ReLU(inplace=True)
-            ))
-            for _ in range(cfg.DECONV.NUM_BASIC_BLOCKS):
-                layers.append(nn.Sequential(
-                    BasicBlock(output_channels, output_channels),
-                ))
-            deconv_layers.append(nn.Sequential(*layers))
-            input_channels = output_channels
+        self.apply(fuse_fn)
 
-        return nn.ModuleList(deconv_layers)
-
-    def _get_deconv_cfg(self, deconv_kernel):
-        if deconv_kernel == 4:
-            padding = 1
-            output_padding = 0
-        elif deconv_kernel == 3:
-            padding = 1
-            output_padding = 1
-        elif deconv_kernel == 2:
-            padding = 0
-            output_padding = 0
-
-        return deconv_kernel, padding, output_padding
-
-    def _make_transition_layer(
-            self, num_channels_pre_layer, num_channels_cur_layer):
-        # Transition layer allows you to grow or reduce number of branches
-
-        num_branches_cur = len(num_channels_cur_layer)
-        num_branches_pre = len(num_channels_pre_layer)
-
-        transition_layers = []
-        for i in range(num_branches_cur):
-            if i < num_branches_pre:
-                if num_channels_cur_layer[i] != num_channels_pre_layer[i]:
-                    transition_layers.append(nn.Sequential(
-                        nn.Conv2d(num_channels_pre_layer[i],
-                                  num_channels_cur_layer[i],
-                                  3,
-                                  1,
-                                  1,
-                                  bias=False),
-                        nn.BatchNorm2d(num_channels_cur_layer[i]),
-                        nn.ReLU(inplace=True)))
-                else:
-                    transition_layers.append(nn.Identity())
-            else:
-                conv3x3s = []
-                for j in range(i + 1 - num_branches_pre):
-                    inchannels = num_channels_pre_layer[-1]
-                    outchannels = num_channels_cur_layer[i] \
-                        if j == i - num_branches_pre else inchannels
-                    conv3x3s.append(nn.Sequential(
-                        nn.Conv2d(
-                            inchannels, outchannels, 3, 2, 1, bias=False),
-                        nn.BatchNorm2d(outchannels),
-                        nn.ReLU(inplace=True)))
-                transition_layers.append(nn.Sequential(*conv3x3s))
-
-        return nn.ModuleList(transition_layers)
 
     def _make_layer(self, block, planes, blocks, stride=1):
         downsample = None
@@ -770,118 +790,6 @@ class PoseHigherResolutionNet(nn.Module):
             layers.append(block(self.inplanes, planes))
 
         return nn.Sequential(*layers)
-
-    def _make_stage(self, layer_config, num_inchannels,
-                    multi_scale_output=True):
-        num_modules = layer_config['NUM_MODULES']
-        num_branches = layer_config['NUM_BRANCHES']
-        num_blocks = layer_config['NUM_BLOCKS']
-        num_channels = layer_config['NUM_CHANNELS']
-        block = blocks_dict[layer_config['BLOCK']]
-        fuse_method = layer_config['FUSE_METHOD']
-
-        modules = []
-        for i in range(num_modules):
-            # multi_scale_output is only used last module
-            if not multi_scale_output and i == num_modules - 1:
-                reset_multi_scale_output = False
-            else:
-                reset_multi_scale_output = True
-
-            modules.append(
-                HighResolutionModule(
-                    num_branches,
-                    block,
-                    num_blocks,
-                    num_inchannels,
-                    num_channels,
-                    fuse_method,
-                    reset_multi_scale_output)
-            )
-            num_inchannels = modules[-1].get_num_inchannels()
-
-        return nn.Sequential(*modules), num_inchannels
-
-    def forward(self, x):
-        x = self.conv1(x)
-        x = self.bn1(x)
-        x = self.relu(x)
-        x = self.conv2(x)
-        x = self.bn2(x)
-        x = self.relu(x)
-        x = self.layer1(x)
-
-        y_list: List[torch.Tensor] = [x]
-
-        x_list = self.transition1(y_list)
-        # x_list = []
-        # x = y_list[0]
-        # branch_idx = 0
-        # for transition in self.transition1:
-        #     y = transition(x)
-        #     x_list.append(y)
-        #     branch_idx += 1
-        #     if branch_idx < len(y_list):
-        #         x = y_list[branch_idx]
-
-        y_list: List[torch.Tensor] = self.stage2(x_list)
-
-        x_list = self.transition2(y_list)
-        # x_list = []
-        # x = y_list[0]
-        # branch_idx = 0
-        # for transition in self.transition2:
-        #     y = transition(x)
-        #     x_list.append(y)
-        #     branch_idx += 1
-        #     if branch_idx < len(y_list):
-        #         x = y_list[branch_idx]
-
-        y_list = self.stage3(x_list)
-
-        x_list = self.transition3(y_list)
-        # x_list = []
-        # x = y_list[0]
-        # branch_idx = 0
-        # for transition in self.transition3:
-        #     y = transition(x)
-        #     x_list.append(y)
-        #     branch_idx += 1
-        #     if branch_idx < len(y_list):
-        #         x = y_list[branch_idx]
-
-        y_list = self.stage4(x_list)
-
-        # x = y_list[0]
-        # y = self.final_layers[0](x)
-        # final_outputs = []
-        # final_outputs.append(y)
-        #
-        # for i in range(self.num_deconvs):
-        #     if self.deconv_config.CAT_OUTPUT[i]:
-        #         x = torch.cat((x, y), 1)
-        #
-        #     x = self.deconv_layers[i](x)
-        #     y = self.final_layers[i + 1](x)
-        #     final_outputs.append(y)
-
-        x = y_list[0]
-        # y = self.final_layers[0](x)
-        # final_outputs = []
-        # final_outputs.append(y)
-        #
-        # for i in range(self.num_deconvs):
-        #     if self.deconv_config.CAT_OUTPUT[i]:
-        #         x = torch.cat((x, y), 1)
-        #
-        #     x = self.deconv_layers[i](x)
-        #     y = self.final_layers[i + 1](x)
-        #     final_outputs.append(y)
-        final_outputs = self.decoder(x)
-
-        # for t in enumerate(final_outputs):
-        #     print(t[0], t[1].size())
-        return final_outputs
 
     def init_weights(self, pretrained='', verbose=True):
         logger.info('=> init weights from normal distribution')
@@ -923,6 +831,122 @@ class PoseHigherResolutionNet(nn.Module):
                             )
                         need_init_state_dict[name] = m
             self.load_state_dict(need_init_state_dict, strict=False)
+
+
+class _ObjectAttentionBlock(nn.Module):
+    '''
+    The basic implementation for object context block
+    Input:
+        N X C X H X W
+    Parameters:
+        in_channels       : the dimension of the input feature map
+        key_channels      : the dimension after the key/query transform
+        scale             : choose the scale to downsample the input feature maps (save memory cost)
+        bn_type           : specify the bn type
+    Return:
+        N X C X H X W
+    '''
+
+    def __init__(self,
+                 in_channels,
+                 key_channels,
+                 scale=1):
+        super(_ObjectAttentionBlock, self).__init__()
+        self.scale = scale
+        self.in_channels = in_channels
+        self.key_channels = key_channels
+        self.pool = nn.MaxPool2d(kernel_size=(scale, scale))
+        self.f_pixel = nn.Sequential(
+            nn.Conv2d(in_channels=self.in_channels, out_channels=self.key_channels,
+                      kernel_size=1, stride=1, padding=0, bias=False),
+            nn.BatchNorm2d(self.key_channels),
+            nn.ReLU(),
+            nn.Conv2d(in_channels=self.key_channels, out_channels=self.key_channels,
+                      kernel_size=1, stride=1, padding=0, bias=False),
+            nn.BatchNorm2d(self.key_channels),
+            nn.ReLU(),
+        )
+        self.f_object = nn.Sequential(
+            nn.Conv2d(in_channels=self.in_channels, out_channels=self.key_channels,
+                      kernel_size=1, stride=1, padding=0, bias=False),
+            nn.BatchNorm2d(self.key_channels),
+            nn.ReLU(),
+            nn.Conv2d(in_channels=self.key_channels, out_channels=self.key_channels,
+                      kernel_size=1, stride=1, padding=0, bias=False),
+            nn.BatchNorm2d(self.key_channels),
+            nn.ReLU(),
+        )
+        self.f_down = nn.Sequential(
+            nn.Conv2d(in_channels=self.in_channels, out_channels=self.key_channels,
+                      kernel_size=1, stride=1, padding=0, bias=False),
+            nn.BatchNorm2d(self.key_channels),
+            nn.ReLU(),
+        )
+        self.f_up = nn.Sequential(
+            nn.Conv2d(in_channels=self.key_channels, out_channels=self.in_channels,
+                      kernel_size=1, stride=1, padding=0, bias=False),
+            nn.BatchNorm2d(self.in_channels),
+            nn.ReLU(),
+        )
+
+    def forward(self, x, proxy):
+        batch_size, h, w = x.size(0), x.size(2), x.size(3)
+        if self.scale > 1:
+            x = self.pool(x)
+
+        query = self.f_pixel(x).view(batch_size, self.key_channels, -1)
+        query = query.permute(0, 2, 1)
+        key = self.f_object(proxy).view(batch_size, self.key_channels, -1)
+        value = self.f_down(proxy).view(batch_size, self.key_channels, -1)
+        value = value.permute(0, 2, 1)
+
+        sim_map = torch.matmul(query, key)
+        sim_map = (self.key_channels ** -.5) * sim_map
+        sim_map = nn.functional.softmax(sim_map, dim=-1)
+
+        # add bg context ...
+        context = torch.matmul(sim_map, value)
+        context = context.permute(0, 2, 1).contiguous()
+        context = context.view(batch_size, self.key_channels, *x.size()[2:])
+        context = self.f_up(context)
+        if self.scale > 1:
+            context = nn.functional.interpolate(input=context, size=(h, w), mode='bilinear', align_corners=False)
+
+        return context
+
+
+class ObjectAttentionBlock2D(_ObjectAttentionBlock):
+    def __init__(self, in_channels, key_channels, scale=1):
+        super(ObjectAttentionBlock2D, self).__init__(in_channels, key_channels, scale)
+
+
+class SpatialOCRModule(nn.Module):
+    """
+    Implementation of the OCR module:
+    We aggregate the global object representation to update the representation for each pixel.
+    """
+
+    def __init__(self,
+                 in_channels,
+                 key_channels,
+                 out_channels,
+                 scale=1,
+                 dropout=0.1):
+        super(SpatialOCRModule, self).__init__()
+        self.object_context_block = ObjectAttentionBlock2D(in_channels, key_channels, scale)
+        _in_channels = 2 * in_channels
+
+        self.conv_bn_dropout = nn.Sequential(
+            nn.Conv2d(_in_channels, out_channels, kernel_size=1, padding=0, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(),
+            nn.Dropout2d(dropout)
+        )
+
+    def forward(self, feats, proxy_feats):
+        context = self.object_context_block(feats, proxy_feats)
+        output = self.conv_bn_dropout(torch.cat([context, feats], 1))
+        return output
 
 
 def get_pose_net(cfg, **kwargs):

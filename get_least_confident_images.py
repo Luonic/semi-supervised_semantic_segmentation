@@ -11,13 +11,14 @@ from minio.error import NoSuchKey
 
 import torch
 from albumentations import ReplayCompose, LongestMaxSize, PadIfNeeded, ToFloat
-MODEL_PATH = 'runs/25_focal-loss-a0.5g0.25x2_staged_backbone_finetuning/model.ts'
+MODEL_PATH = 'runs/36_bce_pose-hrnet_crop-512_size-1024_coco-full_pretrain/model.ts'
 MODEL_DEVICE = 'cuda:0'
+MODEL_DEVICE = 'cpu'
 model = torch.jit.load(MODEL_PATH)
 model.to(MODEL_DEVICE)
 augmentations = ReplayCompose([
         LongestMaxSize(max_size=1024, always_apply=True),
-        PadIfNeeded(min_height=1024, min_width=1024, always_apply=True),
+        # PadIfNeeded(min_height=1024, min_width=1024, always_apply=True),
         ToFloat()])
 
 
@@ -73,8 +74,8 @@ for (image_name,) in image_names[:1000]:
         image_batch_np = np.expand_dims(image, axis=0)
         with torch.no_grad():
             image = torch.from_numpy(image_batch_np).to(MODEL_DEVICE)
-            pred_map = model(image)
-            pred_map = torch.sigmoid(pred_map)
+            pred_maps = model(image)
+            pred_map = torch.sigmoid(pred_maps[-1])
             mask = pred_map[0, 1:]
             binary_mask = (mask > 0.5).to(mask)
             binary_mask = np.transpose(binary_mask.cpu().detach().numpy(), axes=(1, 2, 0))
