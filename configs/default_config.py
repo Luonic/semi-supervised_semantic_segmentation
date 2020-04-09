@@ -1,9 +1,13 @@
+# import os
+# os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
+
 from functools import partial
 import torch
 import losses
 import cv2
 
-import optimizers.ranger
+from optimizers.ranger import Ranger
+from optimizers.diffmod import DiffMod
 
 import data.dataset as dataset
 import data.unsupervised_dataset as unsupervised_dataset
@@ -52,7 +56,7 @@ common = dict(
     world_size=4,
     use_cpu=False,
     workers=4,
-    output_dir='runs/38_bce_my-hrnet_crop-512_size-512_coco-no-blank_pretrain',
+    output_dir='runs/31_hardlabel_diffmod_bce-etropy_my-hrnet-improved-transition-fuse-v4-w48-ocr_crop-512_size-512_skin-finetune_semisup-etropy-featdisc',
     num_classes=2,
     image_size=1024,
 )
@@ -111,35 +115,36 @@ model = dict(model_fn=partial(get_pose_net, cfg=POSE_HIGHER_RESOLUTION_NET, is_t
 # Train params
 train = dict(
     print_freq=10,
-    batch_size_per_worker=5,
-    num_dataloader_workers=4,
-    base_lr=0.004,
+    batch_size_per_worker=4,
+    num_dataloader_workers=3,
+    base_lr=0.001,
     crop_size=512,
     gradient_clip_value=10.0,
 
     semi_supervised_training_start_step=5000
 )
 train['loss'] = losses.CalculateLoss([
-    {'loss_fn': torch.nn.BCEWithLogitsLoss(), 'weight': 1.0}
-    # {'loss_fn': losses.FocalLoss(alpha=0.25, gamma=2), 'weight': 1.0}
+    {'loss_fn': losses.DenseCrossEntropyLossWithLogits(reduction='mean'), 'weight': [0.4, 1.0]},
+    # {'loss_fn': losses.OhemCrossEntropy(), 'weight': 1.0}
+    # {'loss_fn': losses.FocalLoss(alpha=0.5, gamma=2), 'weight': [0.0, 1.0]}
 ])
+
 train['min_lr'] = train['base_lr'] * 0.001
 train['optimizer'] = partial(torch.optim.SGD,
                              lr=train['base_lr'],
                              momentum=0.9,
                              weight_decay=0.0001)
-# train['optimizer'] = partial(optimizers.ranger.Ranger,
+# train['optimizer'] = partial(DiffMod,
 #                              lr=train['base_lr'],
-#                              alpha=0.5,
-#                              k=5,
-#                              N_sma_threshhold=5,
-#                              betas=(.95, 0.999),
-#                              eps=1e-5,
-#                              weight_decay=0.0005)
+#                              betas=(0.9, 0.999),
+#                              len_memory=1000,
+#                              version=0,
+#                              eps=1e-8,
+#                              weight_decay=0.0001)
 train['lr_scheduler'] = partial(torch.optim.lr_scheduler.ReduceLROnPlateau,
                                 mode='min',
                                 factor=0.1,
-                                patience=10,
+                                patience=20*5,
                                 verbose=False,
                                 threshold=0.0001,
                                 threshold_mode='rel',
@@ -162,18 +167,18 @@ train['augmentations'] = ReplayCompose([
     ], p=1),
     ToGray(p=0.1),
     # OneOf([
-    #     RGBShift(r_shift_limit=20, g_shift_limit=20, b_shift_limit=20),
-    #     HueSaturationValue(hue_shift_limit=20, sat_shift_limit=30, val_shift_limit=0),
-    # ], p=1),
+    #     RGBShift(r_shift_limit=10, g_shift_limit=10, b_shift_limit=10),
+    #     HueSaturationValue(hue_shift_limit=10, sat_shift_limit=10, val_shift_limit=1),
+    # ], p=0.3),
     # OneOf([
-    #     #######MotionBlur(blur_limit=7), # Does not work correctly
+    # #     #######MotionBlur(blur_limit=7), # Does not work correctly
     #     GaussianBlur(blur_limit=9)
     # ], p=0.1),
-    # # OneOf([
-    # #     ImageCompression(quality_lower=70, quality_upper=90),
-    # #     ISONoise(color_shift=(0.01, 0.05),
-    # #              intensity=(0.1, 0.5))
-    # # ], p=0.1),
+    # OneOf([
+    #     ImageCompression(quality_lower=70, quality_upper=90),
+    #     ISONoise(color_shift=(0.01, 0.05),
+    #              intensity=(0.1, 0.5))
+    # ], p=0.2),
     # OneOf([
     #     ElasticTransform(p=0.5, alpha=120, sigma=120 * 0.05, alpha_affine=120 * 0.03),
     #     GridDistortion(p=0.5),
@@ -183,12 +188,15 @@ train['augmentations'] = ReplayCompose([
 ])
 train['unsupervised_augmentations'] = ReplayCompose([
     LongestMaxSize(max_size=common['image_size'], always_apply=True),
-    PadIfNeeded(min_height=common['image_size'], min_width=common['image_size'], always_apply=True),
+    PadIfNeeded(min_height=train['crop_size'], min_width=train['crop_size'], always_apply=True,
+                border_mode=cv2.BORDER_CONSTANT),
     RandomResizedCrop(height=train['crop_size'], width=train['crop_size'], scale=(0.25, 1.0), ratio=(0.75, 1.33),
                       always_apply=True),
+    HorizontalFlip(p=0.5),
     ToFloat()])
 train['dataset'] = partial(dataset.SkinSegDataset,
-                           dataset_dir='/home/alex/Code/instascraped/dataset_coco_no-blank',
+                           # dataset_dir='/home/alex/Code/instascraped/dataset_coco_no-blank',
+                           dataset_dir='/home/alex/Code/instascraped/dataset_4_no-blank',
                            augmentations=train['augmentations'],
                            partition=1)
 train['unsupervised_dataset'] = partial(unsupervised_dataset.UnsupervisedImagesDataset,
@@ -208,6 +216,7 @@ val['augmentations'] = ReplayCompose([
     # PadIfNeeded(min_height=train['crop_size'], min_width=train['crop_size'], border_mode=cv2.BORDER_CONSTANT, always_apply=True),
     ToFloat()])
 val['dataset'] = partial(dataset.SkinSegDataset,
-                         dataset_dir='/home/alex/Code/instascraped/dataset_coco_no-blank',
+                         # dataset_dir='/home/alex/Code/instascraped/dataset_coco_no-blank',
+                         dataset_dir='/home/alex/Code/instascraped/dataset_4_no-blank',
                          augmentations=val['augmentations'],
                          partition=0)

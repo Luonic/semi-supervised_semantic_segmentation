@@ -14,15 +14,60 @@ class CalculateLoss():
 
     def __call__(self, predictions_list, target):
         loss = 0
-        for prediction in predictions_list:
+        for prediction_idx, prediction in enumerate(predictions_list):
             prediction = torch.nn.functional.interpolate(prediction, size=(target.size(2), target.size(3)),
                                                          mode='bilinear', align_corners=False)
             for loss_spec in self.losses:
-                loss += loss_spec['loss_fn'](prediction, target) * loss_spec['weight']
+                loss += loss_spec['loss_fn'](prediction, target) * loss_spec['weight'][prediction_idx]
         return loss
 
 
+class DenseCrossEntropyLossWithLogits(nn.Module):
+    def __init__(self, reduction='mean'):
+        super(DenseCrossEntropyLossWithLogits, self).__init__()
+        self.reduction = reduction
+
+    def forward(self, input, target):
+        log_probs = torch.log_softmax(input, dim=1)
+        loss = -(target * log_probs).sum(dim=1)
+        if self.reduction == 'mean':
+            loss = loss.mean()
+        elif self.reduction == 'none':
+            pass
+        else:
+            raise ValueError(f'incorrect value of reduction param: `{self.reduction}`')
+        return loss
+
+
+class OhemCrossEntropy(nn.Module):
+    def __init__(self, thres=0.7, min_kept=100000):
+        super(OhemCrossEntropy, self).__init__()
+        self.thresh = thres
+        self.min_kept = max(1, min_kept)
+        self.criterion = DenseCrossEntropyLossWithLogits(reduction='none')
+
+    def _ohem_forward(self, logits, target, **kwargs):
+        pred = F.softmax(logits, dim=1)
+        pixel_losses = self.criterion(logits, target).contiguous().view(-1)
+
+        pred, ind = pred.contiguous().view(-1, ).contiguous().sort()
+        print('calculating min value')
+        min_value = pred[min(self.min_kept, pred.numel() - 1)]
+        threshold = max(min_value, self.thresh)
+        
+        print('rearrange pixel losses')
+        print(ind.shape, pixel_losses.shape)
+        pixel_losses = pixel_losses[ind]
+        print('get valid losses')
+        pixel_losses = pixel_losses[pred < threshold]
+        return pixel_losses.mean()
+
+    def forward(self, score, target):
+        return self._ohem_forward(score, target)
+
+
 class FocalLoss(nn.Module):
+    # TODO: Improve numerical stability by clipping sigmoid
     def __init__(self, alpha=0.25, gamma=2.0):
         super(FocalLoss, self).__init__()
         self.alpha = alpha
@@ -38,13 +83,14 @@ class FocalLoss(nn.Module):
         alpha_weight_factor = (targets * self.alpha + (1 - targets) * (1 - self.alpha))
         focal_cross_entropy_loss = modulating_factor * alpha_weight_factor * per_entry_cross_ent
 
-        normalizer = modulating_factor.sum()
-        return focal_cross_entropy_loss.sum() / (normalizer + 0.001)
+        # normalizer = modulating_factor.sum().detach()
+        # return focal_cross_entropy_loss.sum() / (normalizer + 0.001)
 
-        # return focal_cross_entropy_loss.mean()
+        return focal_cross_entropy_loss.mean()
 
 
 class NormalizedFocalLossSigmoid(nn.Module):
+
     def __init__(self, axis=-1, alpha=0.25, gamma=2,
                  from_logits=False, batch_axis=0,
                  weight=None, size_average=True, detach_delimeter=True,
@@ -179,7 +225,7 @@ def log_dice_loss(input, target, gamma=1.0):
 def binary_lovasz_loss_with_logits(input, target):
     int_target = torch.argmax(target, dim=1, keepdim=False)
     # input = torch.sigmoid(input)
-    target_list = torch.split(target, 1, dim=0)
+    target_list = torch.split(int_target, 1, dim=0)
     input_list = torch.split(input, 1, dim=0)
     loss = 0
     num_valid_samples = 0
@@ -188,3 +234,21 @@ def binary_lovasz_loss_with_logits(input, target):
         num_valid_samples += mask_sample
         loss += lovasz.lovasz_softmax(inp, tgt, classes=[1], ignore=255, per_image=True) * mask_sample
     return loss / (num_valid_samples + 0.001)
+
+
+def binary_entropy_loss(input):
+    input = torch.sigmoid(input)
+    entropy_pos = input * torch.log(input)
+    entropy_neg = (1. - input) * torch.log(1. - input)
+    return -torch.mean(entropy_pos + entropy_neg) / 2
+
+
+def entropy_loss(input):
+    prob = torch.softmax(input, dim=1)
+    entropy = prob * torch.log_softmax(input, dim=1)
+    loss = -torch.sum(entropy, dim=1)
+    return loss.mean()
+
+
+def smooth_binary_labels(target, alpha=0.1):
+    return target * (1 - alpha) + alpha / 2

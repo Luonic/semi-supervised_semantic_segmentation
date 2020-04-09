@@ -11,7 +11,7 @@ torch.set_num_interop_threads(os.cpu_count())
 cfg_path = 'configs/default_config.py'
 cfg = config.fromfile(cfg_path)
 
-device = 'cuda:0'
+# device = 'cuda:0'
 device = 'cpu'
 # model = cfg['model']['model_fn'](cfg['common']['num_classes'])
 model = cfg['model']['model_fn']()
@@ -22,31 +22,38 @@ workdir = cfg['common']['output_dir']
 # latest_checkpoint_path = os.path.join(workdir, 'best.pth')
 latest_checkpoint_path = os.path.join(workdir, 'checkpoint.pth')
 checkpoint = torch.load(latest_checkpoint_path, map_location='cpu')
-model.load_state_dict(checkpoint['state_dict'])
+model.load_state_dict(checkpoint['state_dict'], strict=False)
 
-# model.fuse_model()
+model.fuse_model()
 
-# jit_model = torch.jit.trace(model, torch.ones((1, 3, cfg['common']['image_size'], cfg['common']['image_size']), dtype=torch.float32))
-# model = torch.jit.script(model)
-# torch.jit.save(model, os.path.join(workdir, 'model.ts'))
-# exit(0)
-# qconfig = torch.quantization.get_default_qconfig('fbgemm')
-# modules_to_fuse =
-# torch.quantization.fuse_modules(model, modules_to_fuse, inplace=False, fuser_func=<function fuse_known_modules>)
+model = torch.jit.script(model)
+torch.jit.save(model, os.path.join(workdir, 'model.ts'))
+exit(0)
 
 
 model.to(device)
+
+# model.qconfig = torch.quantization.QConfig(
+#   activation=torch.quantization.HistogramObserver.with_args(dtype=torch.quint8),
+#   weight=torch.quantization.MovingAveragePerChannelMinMaxObserver.with_args(dtype=torch.qint8))
+
+# torch.backends.quantized.engine = 'qnnpack'
+# model.qconfig = torch.quantization.get_default_qconfig('qnnpack')
+# print(model.qconfig)
+# torch.quantization.prepare(model, inplace=True)
 
 # val_dataset = cfg['val']['dataset']()
 from albumentations import ReplayCompose, LongestMaxSize, SmallestMaxSize, PadIfNeeded, ToFloat
 
 augmentations = ReplayCompose([
     LongestMaxSize(max_size=cfg['common']['image_size'], always_apply=True),
+    # LongestMaxSize(max_size=512, always_apply=True),
     # PadIfNeeded(min_height=cfg['common']['image_size'], min_width=cfg['common']['image_size'], always_apply=True,
     #             border_mode=cv2.BORDER_CONSTANT),
     ToFloat()])
 val_dataset = cfg['train']['unsupervised_dataset'](augmentations=augmentations)
-val_dataset = cfg['val']['dataset'](augmentations=augmentations)
+# val_dataset = cfg['val']['dataset'](augmentations=augmentations)
+# val_dataset = cfg['train']['dataset'](augmentations=augmentations)
 val_dataloader = torch.utils.data.DataLoader(val_dataset,
                                              batch_size=1,
                                              pin_memory=True,
@@ -55,32 +62,39 @@ val_dataloader = torch.utils.data.DataLoader(val_dataset,
                                              shuffle=True)
 
 with torch.no_grad(), torch.jit.optimized_execution(True):
-    for sample in tqdm(val_dataloader, smoothing=0.01):
+    for i, sample in tqdm(enumerate(val_dataloader), smoothing=0.01):
+        # if i == 50:
+        #     print('Quantizing...')
+        #     torch.quantization.convert(model, inplace=True)
+        #     model = torch.jit.script(model)
+        #     torch.jit.save(model, os.path.join(workdir, 'model_quantized.ts'))
         image = sample['image'].to(device)
         # mask = sample['semantic_mask'].to(device, non_blocking=True)
 
         # pred_map = model(image)['out']
 
         pred_maps = model(image)
-        pred_map = torch.sigmoid(pred_maps[-1])
+        # pred_map = torch.softmax(pred_maps[-1], dim=1)
+        pred_map = torch.softmax(torch.cat(pred_maps, dim=-1), dim=1)
         # print(image.size(), pred_map.size())
         pred_map = torch.nn.functional.interpolate(pred_map, size=(image.size(2), image.size(3)), mode='bilinear')
-        binary_mask = (pred_map > 0.5).to(pred_map)
+        # binary_mask = (pred_map > 0.5).to(pred_map)
+        binary_mask = torch.nn.functional.one_hot(torch.argmax(pred_maps[-1], dim=1), num_classes=2).permute(dims=(0, 3, 1, 2)).to(pred_maps[0])
         # pred_map = binary_mask
         print('max', pred_map.max().item(), 'min', pred_map.min().item())
-        confidence = torch.nn.functional.binary_cross_entropy(pred_map, binary_mask, reduction='mean')
-        print(f'Confidence: {confidence.item()}')
+        # confidence = torch.nn.functional.binary_cross_entropy(pred_map, binary_mask, reduction='mean')
+        # print(f'Confidence: {confidence.item()}')
         skin_mask = (pred_map[0, 1].cpu().detach().numpy() * 255).astype(np.uint8)
 
         numpy_image = cv2.cvtColor(np.transpose(image[0].cpu().numpy(), axes=(1, 2, 0)), cv2.COLOR_RGB2BGR)
 
         ratio = 1650 / 2 / max(numpy_image.shape)
-        skin_mask = cv2.resize(skin_mask, None, fx=ratio, fy=ratio)
+        skin_mask = cv2.resize(skin_mask, None, fx=ratio * 2, fy=ratio)
         numpy_image = cv2.resize(numpy_image, None, fx=ratio, fy=ratio)
 
         cv2.imshow('skin', skin_mask)
         cv2.imshow('image', numpy_image)
-        cv2.waitKey(1)
+        cv2.waitKey(30)
 
 max_view_size = 700
 

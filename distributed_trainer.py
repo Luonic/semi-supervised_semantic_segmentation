@@ -27,13 +27,15 @@ def distributed_train(rank, cfg_path):
         dist.init_process_group("gloo", rank=rank, world_size=cfg['common']['world_size'])
         device = 'cpu'
 
+    torch.autograd.set_detect_anomaly(True)
+
     # model = cfg['model']['model_fn'](cfg['common']['num_classes'])
     model = cfg['model']['model_fn']()
     model = model.to(device)
     if device != 'cpu':
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
     device_ids = [device] if device != 'cpu' else None
-    model = torch.nn.parallel.DistributedDataParallel(model, device_ids=device_ids, find_unused_parameters=True)
+    model = torch.nn.parallel.DistributedDataParallel(model, device_ids=device_ids, find_unused_parameters=False)
 
     # trainable_params = utils.get_trainable_params(model.module.decoder) + utils.get_trainable_params(model.module.final_block)
     trainable_params = utils.get_trainable_params(model)
@@ -58,8 +60,8 @@ def distributed_train(rank, cfg_path):
                                 map_location=lambda storage, loc: storage)
         best_metric = checkpoint['best_metric']
         last_epoch = checkpoint['epoch']
-        model.module.load_state_dict(checkpoint['state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer'])
+        model.module.load_state_dict(checkpoint['state_dict'], strict=True)
+        # optimizer.load_state_dict(checkpoint['optimizer'])
         print(f'Loaded checkpoint: Epoch {checkpoint["epoch"]}')
         del checkpoint
         torch.cuda.empty_cache()
@@ -76,16 +78,16 @@ def distributed_train(rank, cfg_path):
                                                    drop_last=True,
                                                    num_workers=cfg['train']['num_dataloader_workers'])
 
-    # unsupervised_dataset = cfg['train']['unsupervised_dataset']()
-    # unsupervised_sampler = torch.utils.data.distributed.DistributedSampler(unsupervised_dataset)
-    # unsupervised_dataloader = torch.utils.data.DataLoader(unsupervised_dataset,
-    #                                                       batch_size=cfg['train']['batch_size_per_worker'],
-    #                                                       sampler=unsupervised_sampler,
-    #                                                       pin_memory=True,
-    #                                                       drop_last=True,
-    #                                                       num_workers=cfg['train']['num_dataloader_workers'])
-    # unsupervised_dataloader = iter(unsupervised_dataloader)
-    unsupervised_dataloader = None
+    unsupervised_dataset = cfg['train']['unsupervised_dataset']()
+    unsupervised_sampler = torch.utils.data.distributed.DistributedSampler(unsupervised_dataset)
+    unsupervised_dataloader = torch.utils.data.DataLoader(unsupervised_dataset,
+                                                          batch_size=cfg['train']['batch_size_per_worker'],
+                                                          sampler=unsupervised_sampler,
+                                                          pin_memory=True,
+                                                          drop_last=True,
+                                                          num_workers=cfg['train']['num_dataloader_workers'])
+    unsupervised_dataloader = iter(unsupervised_dataloader)
+    # unsupervised_dataloader = None
 
     val_dataset = cfg['val']['dataset']()
     val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset)
@@ -170,7 +172,7 @@ def cleanup():
 
 def main():
     os.environ['MASTER_ADDR'] = '192.168.1.73'
-    os.environ['MASTER_PORT'] = '15000'
+    os.environ['MASTER_PORT'] = '15001'
     cfg_path = 'configs/default_config.py'
     cfg = config.fromfile(cfg_path)
     os.makedirs(cfg['common']['output_dir'], exist_ok=True)

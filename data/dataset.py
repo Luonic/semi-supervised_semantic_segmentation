@@ -154,9 +154,12 @@ if __name__ == '__main__':
     #     # ], p=0.8),
     #     ToFloat()
     # ])
-    dataset = SkinSegDataset(dataset_dir='/home/alex/Code/instascraped/dataset_coco_no-blank',
-                             augmentations=augmentations,
-                             partition=1)
+    # dataset = SkinSegDataset(dataset_dir='/home/alex/Code/instascraped/dataset_coco_no-blank',
+    #                          augmentations=augmentations,
+    #                          partition=1)
+
+    dataset = dcfg.train['dataset']()
+
     from tqdm import tqdm
     for sample in tqdm(dataset):
         image = sample['image']
