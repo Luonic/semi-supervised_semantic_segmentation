@@ -4,9 +4,10 @@ import numpy as np
 import torch
 from albumentations import ReplayCompose, LongestMaxSize, ToFloat
 
-MODEL_PATH = 'runs/30_hardlabel_diffmod_bce-etropy_my-hrnet-improved-transition-fuse-v4-w48-ocr_crop-512_size-512_skin-finetune/model.ts'
-MODEL_DEVICE = 'cuda:1'
-# MODEL_DEVICE = 'cpu'
+# MODEL_PATH = 'runs/34_hrnet-classic-transfuse-w48_BCE0.75-DICE0.25_harder-aug_finetune_dataset-5/model.ts'
+MODEL_PATH = 'runs/41_hrnet-big-msa-classic-transfuse-w48_BCE0.75-DICE0.25_harder-aug_coco-no-blank-pretrain/model_quantized.ts'
+# MODEL_DEVICE = 'cuda:1'
+MODEL_DEVICE = 'cpu'
 model = torch.jit.load(MODEL_PATH)
 model.to(MODEL_DEVICE)
 augmentations = ReplayCompose([
@@ -14,7 +15,8 @@ augmentations = ReplayCompose([
     # PadIfNeeded(min_height=1024, min_width=1024, always_apply=True),
     ToFloat()])
 
-video_capture = cv2.VideoCapture(0)
+# video_capture = cv2.VideoCapture(0)
+video_capture = cv2.VideoCapture('/home/alex/Videos/Face Recognition/Render.mp4')
 
 while True:
     # Capture frame-by-frame
@@ -22,13 +24,11 @@ while True:
     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     orig_image = image = augmentations(image=image)['image']
     image = np.transpose(image, axes=(2, 0, 1))
-    image_batch_np = np.expand_dims(image, axis=0)
     with torch.no_grad(), torch.jit.optimized_execution(True):
-        image = torch.from_numpy(image_batch_np).to(MODEL_DEVICE)
-        pred_maps = model(image)
-        pred_map = torch.softmax(pred_maps[-1], dim=1)
-        mask = pred_map[0, 1:]
-        binary_mask = (mask > 0.5).to(mask)
+        image = torch.from_numpy(image).to(MODEL_DEVICE)
+        binary_mask, prob_mask = model(image)
+        mask = prob_mask[1:]
+        binary_mask = binary_mask[1:]
         # binary_mask = binary_mask * mask
         binary_mask = np.transpose(binary_mask.cpu().detach().numpy(), axes=(1, 2, 0))
         mask = np.transpose(mask.cpu().detach().numpy(), axes=(1, 2, 0))

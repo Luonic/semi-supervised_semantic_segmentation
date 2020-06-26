@@ -8,8 +8,10 @@ cv2.setNumThreads(0)
 cv2.ocl.setUseOpenCL(False)
 
 class UnsupervisedImagesDataset(torch.utils.data.Dataset):
-    def __init__(self, dataset_dir, augmentations=None):
-        self.filenames = glob(os.path.join(dataset_dir, '*.jp*g'))
+    def __init__(self, dataset_dirs, augmentations=None):
+        self.filenames = []
+        for dataset_dir in dataset_dirs:
+            self.filenames.extend(glob(os.path.join(dataset_dir, '*.jp*g')))
         self.augmentations = augmentations
 
     def __getitem__(self, item):

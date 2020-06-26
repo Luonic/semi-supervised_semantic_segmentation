@@ -11,9 +11,9 @@ from minio.error import NoSuchKey
 
 import torch
 from albumentations import ReplayCompose, LongestMaxSize, PadIfNeeded, ToFloat
-MODEL_PATH = 'runs/36_bce_pose-hrnet_crop-512_size-1024_coco-full_pretrain/model.ts'
+MODEL_PATH = 'runs/33_hrnet-classic-transfuse-w48_BCE0.75-DICE0.25_harder-aug_finetune_dataset-5/model.ts'
 MODEL_DEVICE = 'cuda:0'
-MODEL_DEVICE = 'cpu'
+# MODEL_DEVICE = 'cpu'
 model = torch.jit.load(MODEL_PATH)
 model.to(MODEL_DEVICE)
 augmentations = ReplayCompose([
@@ -75,9 +75,14 @@ for (image_name,) in image_names[:1000]:
         with torch.no_grad():
             image = torch.from_numpy(image_batch_np).to(MODEL_DEVICE)
             pred_maps = model(image)
-            pred_map = torch.sigmoid(pred_maps[-1])
+            for i in range(len(pred_maps)):
+                pred_maps[i] = torch.nn.functional.interpolate(pred_maps[i], image.shape[2:4], mode='bilinear',
+                                                               align_corners=False)
+            pred_map = torch.softmax(pred_maps[-1], dim=1)
             mask = pred_map[0, 1:]
-            binary_mask = (mask > 0.5).to(mask)
+            binary_mask = (torch.argmax(pred_map[0], dim=0, keepdim=False) == 1).to(mask)
+            binary_mask = torch.unsqueeze(binary_mask, dim=0)
+            # binary_mask = binary_mask * mask
             binary_mask = np.transpose(binary_mask.cpu().detach().numpy(), axes=(1, 2, 0))
             mask = np.transpose(mask.cpu().detach().numpy(), axes=(1, 2, 0))
         red_tensor = np.array([[[1, 0, 0]]], dtype=np.float32)
@@ -85,14 +90,16 @@ for (image_name,) in image_names[:1000]:
 
         resize_ratio = 800 / max(orig_image.shape)
         image = cv2.cvtColor(cv2.resize(orig_image, None, fx=resize_ratio, fy=resize_ratio), cv2.COLOR_RGB2BGR)
-        visualization_mask = cv2.resize(visualization_mask, (image.shape[1], image.shape[0]))
-        binary_mask = np.expand_dims(cv2.resize(binary_mask, (image.shape[1], image.shape[0])), axis=2)
+        visualization_mask = cv2.resize(visualization_mask, (image.shape[1], image.shape[0]), interpolation=cv2.INTER_LINEAR)
+        binary_mask = np.expand_dims(cv2.resize(binary_mask, (image.shape[1], image.shape[0]), interpolation=cv2.INTER_LINEAR), axis=2)
         image = image * (1 - binary_mask) + (image * (0.5 * binary_mask) + visualization_mask * (0.5 * binary_mask))
-        mask = cv2.resize(mask, None, fx=resize_ratio, fy=resize_ratio)
+        mask_resize_ratio = 800 / max(mask.shape)
+        mask = cv2.resize(mask, None, fx=mask_resize_ratio, fy=mask_resize_ratio)
 
         cv2.imshow('image', image)
         cv2.imshow('mask', mask)
         key = cv2.waitKey(0)
+        # If pressed Return
         if key == 13:
             if IMAGE_SAVE_DIR != '':
 

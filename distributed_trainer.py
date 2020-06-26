@@ -1,4 +1,3 @@
-import logging
 import os
 import shutil
 
@@ -8,9 +7,11 @@ import torch.multiprocessing as mp
 from torch.utils.tensorboard import SummaryWriter
 
 import config
+import mean_teacher
 import train
 import utils.utils as utils
-import shutil
+from itertools import cycle, chain
+
 
 def distributed_train(rank, cfg_path):
     utils.seed_everything(0)
@@ -27,7 +28,7 @@ def distributed_train(rank, cfg_path):
         dist.init_process_group("gloo", rank=rank, world_size=cfg['common']['world_size'])
         device = 'cpu'
 
-    torch.autograd.set_detect_anomaly(True)
+    # torch.autograd.set_detect_anomaly(True)
 
     # model = cfg['model']['model_fn'](cfg['common']['num_classes'])
     model = cfg['model']['model_fn']()
@@ -37,19 +38,35 @@ def distributed_train(rank, cfg_path):
     device_ids = [device] if device != 'cpu' else None
     model = torch.nn.parallel.DistributedDataParallel(model, device_ids=device_ids, find_unused_parameters=False)
 
-    # trainable_params = utils.get_trainable_params(model.module.decoder) + utils.get_trainable_params(model.module.final_block)
-    trainable_params = utils.get_trainable_params(model)
-    # trainable_params = model.module.get_params_with_layerwise_lr(model.module, cfg['train']['base_lr'])
-    # trainable_params = model.module.get_params_with_layerwise_lr(
-    #     encoder_lr=cfg['train']['base_lr'] * 0.01,
-    #     decoder_lr=cfg['train']['base_lr'],
-    #     classifier_lr=cfg['train']['base_lr']
-    # )
+    ema_model = cfg['model']['model_fn']()
+    ema_model.to(device)
+    mean_teacher.detach_model_parameters(ema_model)
+    if device != 'cpu':
+        ema_model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(ema_model)
 
+    trainable_params = utils.get_trainable_params(model)
+    # trainable_params = chain(
+    #     utils.get_trainable_params(model.module.aux_head),
+    #     utils.get_trainable_params(model.module.final_aggregation)
+    # )
     optimizer = cfg['train']['optimizer'](params=trainable_params)
 
     output_dir = cfg['common']['output_dir']
     train_dir = output_dir
+
+    pretrained_checkpoint_path = cfg['train']['pretrained_checkpoint_path']
+    if os.path.exists(pretrained_checkpoint_path):
+        checkpoint = torch.load(pretrained_checkpoint_path, map_location=lambda storage, loc: storage)
+        model.module.load_state_dict(checkpoint['state_dict'], strict=False)
+        ema_model.load_state_dict(checkpoint['state_dict'], strict=False)
+        if rank == 0:
+            print(f'Loaded pretrained checkpoint {pretrained_checkpoint_path}')
+        del checkpoint
+        torch.cuda.empty_cache()
+
+    ema_model.load_state_dict(model.module.state_dict())
+    ema_model.eval()
+    # ema_model.train()
 
     last_epoch = 0
     best_metric = None
@@ -58,10 +75,11 @@ def distributed_train(rank, cfg_path):
     if os.path.exists(latest_checkpoint_path):
         checkpoint = torch.load(latest_checkpoint_path,
                                 map_location=lambda storage, loc: storage)
+        model.module.load_state_dict(checkpoint['state_dict'], strict=False)
+        ema_model.load_state_dict(checkpoint['ema_state_dict'], strict=False)
+        # optimizer.load_state_dict(checkpoint['optimizer'])
         best_metric = checkpoint['best_metric']
         last_epoch = checkpoint['epoch']
-        model.module.load_state_dict(checkpoint['state_dict'], strict=True)
-        # optimizer.load_state_dict(checkpoint['optimizer'])
         print(f'Loaded checkpoint: Epoch {checkpoint["epoch"]}')
         del checkpoint
         torch.cuda.empty_cache()
@@ -86,7 +104,7 @@ def distributed_train(rank, cfg_path):
                                                           pin_memory=True,
                                                           drop_last=True,
                                                           num_workers=cfg['train']['num_dataloader_workers'])
-    unsupervised_dataloader = iter(unsupervised_dataloader)
+    unsupervised_dataloader = cycle(iter(unsupervised_dataloader))
     # unsupervised_dataloader = None
 
     val_dataset = cfg['val']['dataset']()
@@ -107,7 +125,7 @@ def distributed_train(rank, cfg_path):
         summary_writer = None
 
     torch.cuda.empty_cache()
-    for epoch in range(last_epoch, 1000):
+    for epoch in range(last_epoch, 999): #60 + 60 * 2 + 60 * 4
         train_sampler.set_epoch(epoch)
         global_step = utils.calc_global_step(dataset_len=len(train_dataset), world_size=cfg['common']['world_size'],
                                              batch_size_per_worker=cfg['train']['batch_size_per_worker'], epoch=epoch)
@@ -117,6 +135,7 @@ def distributed_train(rank, cfg_path):
 
         # Train one epoch
         train.train(model=model,
+                    ema_model=ema_model,
                     optimizer=optimizer,
                     dataloader=train_dataloader,
                     unsupervised_dataloader=unsupervised_dataloader,
@@ -150,6 +169,7 @@ def distributed_train(rank, cfg_path):
                 'epoch': epoch + 1,
                 'best_metric': val_metric,
                 'state_dict': model.module.state_dict(),
+                'ema_state_dict': ema_model.state_dict(),
                 'optimizer': optimizer.state_dict(),
             }, os.path.join(train_dir, 'checkpoint.pth'))
             print(f'Saved checkpoint')

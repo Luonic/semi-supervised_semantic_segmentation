@@ -22,57 +22,7 @@ from typing import List, Tuple
 
 from yacs.config import CfgNode as CN
 
-# pose_multi_resoluton_net related params
-# POSE_HIGHER_RESOLUTION_NET = CN()
-# POSE_HIGHER_RESOLUTION_NET.PRETRAINED_LAYERS = ['*']
-# POSE_HIGHER_RESOLUTION_NET.STEM_INPLANES = 64
-# POSE_HIGHER_RESOLUTION_NET.FINAL_CONV_KERNEL = 1
-# POSE_HIGHER_RESOLUTION_NET.NUM_JOINTS = 2
-# POSE_HIGHER_RESOLUTION_NET.TAG_PER_JOINT = True
-#
-# POSE_HIGHER_RESOLUTION_NET.STAGE1 = CN()
-# POSE_HIGHER_RESOLUTION_NET.STAGE1.NUM_MODULES = 1
-# POSE_HIGHER_RESOLUTION_NET.STAGE1.NUM_BRANCHES = 1
-# POSE_HIGHER_RESOLUTION_NET.STAGE1.NUM_BLOCKS = [4]
-# POSE_HIGHER_RESOLUTION_NET.STAGE1.NUM_CHANNELS = [64]
-# POSE_HIGHER_RESOLUTION_NET.STAGE1.BLOCK = 'BOTTLENECK'
-# POSE_HIGHER_RESOLUTION_NET.STAGE1.FUSE_METHOD = 'SUM'
-#
-# POSE_HIGHER_RESOLUTION_NET.STAGE2 = CN()
-# POSE_HIGHER_RESOLUTION_NET.STAGE2.NUM_MODULES = 1
-# POSE_HIGHER_RESOLUTION_NET.STAGE2.NUM_BRANCHES = 2
-# POSE_HIGHER_RESOLUTION_NET.STAGE2.NUM_BLOCKS = [4, 4]
-# POSE_HIGHER_RESOLUTION_NET.STAGE2.NUM_CHANNELS = [24, 48]
-# POSE_HIGHER_RESOLUTION_NET.STAGE2.BLOCK = 'BASIC'
-# POSE_HIGHER_RESOLUTION_NET.STAGE2.FUSE_METHOD = 'SUM'
-#
-# POSE_HIGHER_RESOLUTION_NET.STAGE3 = CN()
-# POSE_HIGHER_RESOLUTION_NET.STAGE3.NUM_MODULES = 4
-# POSE_HIGHER_RESOLUTION_NET.STAGE3.NUM_BRANCHES = 3
-# POSE_HIGHER_RESOLUTION_NET.STAGE3.NUM_BLOCKS = [4, 4, 4]
-# POSE_HIGHER_RESOLUTION_NET.STAGE3.NUM_CHANNELS = [24, 48, 92]
-# POSE_HIGHER_RESOLUTION_NET.STAGE3.BLOCK = 'BASIC'
-# POSE_HIGHER_RESOLUTION_NET.STAGE3.FUSE_METHOD = 'SUM'
-#
-# POSE_HIGHER_RESOLUTION_NET.STAGE4 = CN()
-# POSE_HIGHER_RESOLUTION_NET.STAGE4.NUM_MODULES = 3
-# POSE_HIGHER_RESOLUTION_NET.STAGE4.NUM_BRANCHES = 4
-# POSE_HIGHER_RESOLUTION_NET.STAGE4.NUM_BLOCKS = [4, 4, 4, 4]
-# POSE_HIGHER_RESOLUTION_NET.STAGE4.NUM_CHANNELS = [24, 48, 92, 192]
-# POSE_HIGHER_RESOLUTION_NET.STAGE4.BLOCK = 'BASIC'
-# POSE_HIGHER_RESOLUTION_NET.STAGE4.FUSE_METHOD = 'SUM'
-#
-# POSE_HIGHER_RESOLUTION_NET.DECONV = CN()
-# POSE_HIGHER_RESOLUTION_NET.DECONV.NUM_DECONVS = 0
-# POSE_HIGHER_RESOLUTION_NET.DECONV.NUM_CHANNELS = [64, 32]
-# POSE_HIGHER_RESOLUTION_NET.DECONV.NUM_BASIC_BLOCKS = 4
-# POSE_HIGHER_RESOLUTION_NET.DECONV.KERNEL_SIZE = [4, 4]
-# POSE_HIGHER_RESOLUTION_NET.DECONV.CAT_OUTPUT = [True, True]
-#
-# POSE_HIGHER_RESOLUTION_NET.LOSS = CN()
-# POSE_HIGHER_RESOLUTION_NET.LOSS.WITH_AE_LOSS = [False, False, False]
-
-# large net
+# medium net
 POSE_HIGHER_RESOLUTION_NET = CN()
 POSE_HIGHER_RESOLUTION_NET.PRETRAINED_LAYERS = ['*']
 POSE_HIGHER_RESOLUTION_NET.STEM_INPLANES = 64
@@ -111,13 +61,6 @@ POSE_HIGHER_RESOLUTION_NET.STAGE4.NUM_BLOCKS = [4, 4, 4, 4]
 POSE_HIGHER_RESOLUTION_NET.STAGE4.NUM_CHANNELS = [48, 96, 192, 384]
 POSE_HIGHER_RESOLUTION_NET.STAGE4.BLOCK = 'BASIC'
 POSE_HIGHER_RESOLUTION_NET.STAGE4.FUSE_METHOD = 'SUM'
-
-POSE_HIGHER_RESOLUTION_NET.DECONV = CN()
-POSE_HIGHER_RESOLUTION_NET.DECONV.NUM_DECONVS = 0
-POSE_HIGHER_RESOLUTION_NET.DECONV.NUM_CHANNELS = [64, 32]
-POSE_HIGHER_RESOLUTION_NET.DECONV.NUM_BASIC_BLOCKS = 4
-POSE_HIGHER_RESOLUTION_NET.DECONV.KERNEL_SIZE = [4, 4]
-POSE_HIGHER_RESOLUTION_NET.DECONV.CAT_OUTPUT = [True, True]
 
 POSE_HIGHER_RESOLUTION_NET.LOSS = CN()
 POSE_HIGHER_RESOLUTION_NET.LOSS.WITH_AE_LOSS = [False, False, False]
@@ -307,9 +250,8 @@ class HighResolutionModule(nn.Module):
         self.fuse_method = fuse_method
         self.num_branches = len(num_out_channels)
 
-        # self.fuse_module = TransitionFuse(num_in_channels, num_out_channels)
-        # self.fuse_module = ImprovedTransitionFuse(num_in_channels, num_out_channels)
-        self.fuse_module = ImprovedTransitionFuseV4(num_in_channels, num_out_channels)
+        self.fuse_module = TransitionFuse(num_in_channels, num_out_channels)
+        # self.fuse_module = ImprovedTransitionFuseV4(num_in_channels, num_out_channels)
         self.branches: Final = self._make_branches(self.num_branches, block, num_blocks, num_out_channels)
 
     def _make_one_branch(self, block, num_blocks, num_channels):
@@ -1042,6 +984,46 @@ class HighResolutionMultiscaleAggregator(nn.Module):
         output = self.concat.cat(resized_list, dim=1)
         return output
 
+class HighResolutionMultiscaleAggregatorWithPixelwiseAttention(nn.Module):
+    def __init__(self, input_channels, num_classes):
+        super(HighResolutionMultiscaleAggregator, self).__init__()
+        self.concat = torch.nn.quantized.FloatFunctional()
+        self.attention_modules = nn.ModuleList()
+        for i in range(len(input_channels) - 1):
+            self.attention_modules = nn.Sequential(
+                ConvBNRelu(input_channels[i], input_channels[i], kernel_size=3, stride=1, padding=1),
+                ConvBNRelu(input_channels[i], input_channels[i], kernel_size=3, stride=1, padding=1),
+                nn.Conv2d(input_channels[i], num_classes, kernel_size=1, stride=1, padding=0)
+            )
+        self.float_adds = nn.ModuleList()
+        for i in range(len(input_channels) - 1):
+            self.float_adds.append(nn.quantized.FloatFunctional())
+
+        self.float_multiplies = nn.ModuleList()
+        for i in len(len(input_channels) - 1):
+            self.float_multiplies.append(nn.ModuleList([
+                nn.quantized.FloatFunctional(),
+                nn.quantized.FloatFunctional()
+            ]))
+
+    def forward(self, input: List[torch.Tensor]):
+        attention_masks = []
+        i = len(input) - 1
+        for attention_module in self.attention_modules:
+            attention_masks.append(attention_module(input[i]))
+            i -= 1
+
+        # for
+        tgt_size = input[0].size()[2:4]
+
+        resized_list = []
+        for scale_tensor in input:
+            resized_list.append(torch.nn.functional.interpolate(scale_tensor, tgt_size, mode='bilinear',
+                                                                align_corners=False))
+
+        output = self.concat.cat(resized_list, dim=1)
+        return output
+
 
 class HigherDecoderStage(nn.Module):
     # layers: Final
@@ -1186,22 +1168,30 @@ class Stem(nn.Module):
 class HigherResolutionNet(nn.Module):
     __constants__ = ['stage2', 'stage3', 'stage4']
 
-    def __init__(self, cfg, **kwargs):
-        self.inplanes = 64
+    def __init__(self, cfg):
         super(HigherResolutionNet, self).__init__()
 
         self.quant = torch.quantization.QuantStub()
         self.dequant = torch.quantization.DeQuantStub()
+        # self.dequant_features = torch.quantization.DeQuantStub()
 
         # stem net
-        self.stem = Stem()
+        stem_num_channels = cfg['STEM_INPLANES']
+        self.stem = Stem(num_in_channels=3, num_out_channels=stem_num_channels)
 
-        self.stage1 = Stage(num_in_channels=[64],
-                            num_out_channels=[64 * 4],
-                            num_modules=1,
-                            num_blocks=[4],
-                            block=BottleneckBlock,
-                            fuse_method=None)
+        self.stage1_cfg = cfg['STAGE1']
+        num_modules = self.stage1_cfg['NUM_MODULES']
+        num_blocks = self.stage1_cfg['NUM_BLOCKS']
+        num_channels = self.stage1_cfg['NUM_CHANNELS']
+        block = blocks_dict[self.stage1_cfg['BLOCK']]
+        fuse_method = self.stage1_cfg['FUSE_METHOD']
+        num_channels = [channels * block.expansion for channels in num_channels]
+        self.stage1 = Stage(num_in_channels=[stem_num_channels],
+                            num_out_channels=num_channels,
+                            num_modules=num_modules,
+                            num_blocks=num_blocks,
+                            block=block,
+                            fuse_method=fuse_method)
 
         self.stage2_cfg = cfg['STAGE2']
         num_modules = self.stage2_cfg['NUM_MODULES']
@@ -1209,9 +1199,7 @@ class HigherResolutionNet(nn.Module):
         num_channels = self.stage2_cfg['NUM_CHANNELS']
         block = blocks_dict[self.stage2_cfg['BLOCK']]
         fuse_method = self.stage2_cfg['FUSE_METHOD']
-        num_channels = [
-            num_channels[i] * block.expansion for i in range(len(num_channels))
-        ]
+        num_channels = [channels * block.expansion for channels in num_channels]
         # TODO: Replace hardcoded 256 with calculation of number of channels based on config
         self.stage2 = Stage(num_in_channels=[64 * 4],
                             num_out_channels=num_channels,
@@ -1227,9 +1215,7 @@ class HigherResolutionNet(nn.Module):
         num_channels = self.stage3_cfg['NUM_CHANNELS']
         block = blocks_dict[self.stage3_cfg['BLOCK']]
         fuse_method = self.stage3_cfg['FUSE_METHOD']
-        num_channels = [
-            num_channels[i] * block.expansion for i in range(len(num_channels))
-        ]
+        num_channels = [channels * block.expansion for channels in num_channels]
         self.stage3 = Stage(num_in_channels=pre_stage_channels,
                             num_out_channels=num_channels,
                             num_modules=num_modules,
@@ -1244,9 +1230,7 @@ class HigherResolutionNet(nn.Module):
         num_channels = self.stage4_cfg['NUM_CHANNELS']
         block = blocks_dict[self.stage4_cfg['BLOCK']]
         fuse_method = self.stage4_cfg['FUSE_METHOD']
-        num_channels = [
-            num_channels[i] * block.expansion for i in range(len(num_channels))
-        ]
+        num_channels = [channels * block.expansion for channels in num_channels]
         self.stage4 = Stage(num_in_channels=pre_stage_channels,
                             num_out_channels=num_channels,
                             num_modules=num_modules,
@@ -1255,49 +1239,22 @@ class HigherResolutionNet(nn.Module):
                             fuse_method=fuse_method)
         pre_stage_channels = num_channels
 
-        # num_final_channels = [num_channels[0] for i in range(len(num_channels))]
-        # num_final_channels = num_channels
-        num_final_channels = [pre_stage_channels[0] * 2]
+        # num_final_channels = [pre_stage_channels[0]]
+        num_final_channels = sum(pre_stage_channels)
 
-        self.final_aggregation = ImprovedTransitionFuseV4(pre_stage_channels, num_final_channels)
-        # self.multires_aggregation = HighResolutionMultiscaleAggregator()
-        #
-        multires_aggregation_channels = sum(num_final_channels)
-        #
-        self.ocr_bottleneck = ConvBNRelu(in_channels=multires_aggregation_channels,
-                                         out_channels=cfg.OCR.MID_CHANNELS,
-                                         kernel_size=3,
-                                         stride=1,
-                                         padding=1) if multires_aggregation_channels != cfg.OCR.MID_CHANNELS else nn.Identity()
-        self.aux_head = nn.Sequential(
-            ConvBNRelu(in_channels=multires_aggregation_channels,
-                       out_channels=multires_aggregation_channels,
-                       kernel_size=1,
-                       stride=1,
-                       padding=0),
-            nn.Conv2d(in_channels=multires_aggregation_channels,
-                      out_channels=cfg.NUM_JOINTS,
-                      kernel_size=1,
-                      stride=1,
-                      padding=0,
-                      bias=True)
-        )
-        self.ocr_gather_head = SpatialGatherModule(cfg.NUM_JOINTS)
-        self.ocr_distribute_head = SpatialOCRModule(in_channels=cfg.OCR.MID_CHANNELS,
-                                                    key_channels=cfg.OCR.KEY_CHANNELS,
-                                                    out_channels=cfg.OCR.MID_CHANNELS,
-                                                    scale=cfg.OCR.SCALE,
-                                                    dropout=cfg.OCR.DROPOUT)
-        self.cls_head = nn.Conv2d(cfg.OCR.MID_CHANNELS, cfg.NUM_JOINTS, kernel_size=1, stride=1, padding=0, bias=True)
 
-        # self.decoder = HigherDecoder(input_channels=num_channels[0],
-        #                              output_channels=cfg.NUM_JOINTS,
-        #                              final_kernel_size=cfg.FINAL_CONV_KERNEL,
-        #                              num_deconvs=cfg.DECONV.NUM_DECONVS,
-        #                              deconv_num_basic_blocks=cfg.DECONV.NUM_BASIC_BLOCKS,
-        #                              deconv_output_channels=cfg.DECONV.NUM_CHANNELS,
-        #                              deconv_kernel_size=cfg.DECONV.KERNEL_SIZE,
-        #                              cat_output=cfg.DECONV.CAT_OUTPUT)
+        # self.final_aggregation = TransitionFuse(pre_stage_channels, pre_stage_channels)
+        self.multires_aggregation = HighResolutionMultiscaleAggregator()
+        self.cls_head = nn.Sequential(
+                ConvBNRelu(num_final_channels, num_final_channels // 2, kernel_size=3, stride=1, padding=1),
+                ConvBNRelu(num_final_channels // 2, num_final_channels // 4, kernel_size=3, stride=1, padding=1),
+                nn.Conv2d(num_final_channels // 4, cfg.NUM_JOINTS, kernel_size=1, stride=1, padding=0, bias=True)
+            )
+
+
+        # self.feature_dequants = nn.ModuleList()
+        # for _ in self.stage4.num_out_channels:
+        #     self.feature_dequants.append(torch.quantization.DeQuantStub())
 
     def forward(self, x):
         x = self.quant(x)
@@ -1310,24 +1267,17 @@ class HigherResolutionNet(nn.Module):
         y_list = self.stage3(y_list)
         y_list = self.stage4(y_list)
 
-        y_list = self.final_aggregation(y_list)
+        # features = y_list = self.final_aggregation(y_list)
 
-        # multires_features = self.multires_aggregation(y_list)
-        multires_features = y_list[0]
+        features = multires_features = self.multires_aggregation(y_list)
 
-        # ocr
-        out_aux = self.aux_head(multires_features)
-        # compute contrast feature
-        feats = self.ocr_bottleneck(multires_features)
-        context = self.ocr_gather_head(feats, out_aux)
-        feats = self.ocr_distribute_head(feats, context)
-        out = self.cls_head(feats)
+        logits = self.cls_head(multires_features)
 
-        final_outputs = []
-        final_outputs.append(self.dequant(out_aux))
-        final_outputs.append(self.dequant(out))
-
-        return final_outputs
+        outputs = [self.dequant(logits)]
+        # outputs = [out]
+        # features = [self.dequant_features(features)]
+        features = [features]
+        return features, outputs
 
     def fuse_model(self):
         def fuse_fn(m):
@@ -1376,6 +1326,30 @@ class HigherResolutionNet(nn.Module):
                             )
                         need_init_state_dict[name] = m
             self.load_state_dict(need_init_state_dict, strict=False)
+
+    def init_module(self, module):
+        logger.info('=> init weights from normal distribution')
+        for m in module.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.normal_(m.weight, std=0.001)
+                for name, _ in m.named_parameters():
+                    if name in ['bias']:
+                        nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.ConvTranspose2d):
+                nn.init.normal_(m.weight, std=0.001)
+                for name, _ in m.named_parameters():
+                    if name in ['bias']:
+                        nn.init.constant_(m.bias, 0)
+
+    def reinit_classifier(self):
+        self.init_module(self.aux_head)
+        self.init_module(self.ocr_bottleneck)
+        self.init_module(self.ocr_distribute_head)
+        self.init_module(self.ocr_gather_head)
+        self.init_module(self.cls_head)
 
 
 class SpatialGatherModule(nn.Module):
@@ -1497,7 +1471,7 @@ class SpatialOCRModule(nn.Module):
         return output
 
 
-def get_pose_net(cfg, **kwargs):
-    model = HigherResolutionNet(cfg, **kwargs)
+def get_pose_net(cfg):
+    model = HigherResolutionNet(cfg)
     model.init_weights('', verbose=False)
     return model
