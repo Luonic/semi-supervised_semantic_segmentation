@@ -12,21 +12,21 @@ torch.set_num_interop_threads(os.cpu_count())
 cfg_path = 'configs/default_config.py'
 cfg = config.fromfile(cfg_path)
 
-# device = 'cuda:0'
-device = 'cpu'
+device = 'cuda:0'
+# device = 'cpu'
 # model = cfg['model']['model_fn'](cfg['common']['num_classes'])
 model = cfg['model']['model_fn']()
 model.to('cpu')
 model.eval()
 
 workdir = cfg['common']['output_dir']
-# latest_checkpoint_path = os.path.join(workdir, 'best.pth')
-latest_checkpoint_path = os.path.join(workdir, 'checkpoint.pth')
+latest_checkpoint_path = os.path.join(workdir, 'best.pth')
+# latest_checkpoint_path = os.path.join(workdir, 'checkpoint.pth')
 checkpoint = torch.load(latest_checkpoint_path, map_location='cpu')
 model.load_state_dict(checkpoint['state_dict'], strict=False)
 
 model.fuse_model()
-model.num_scales = torch.tensor(2)
+model.num_scales = torch.tensor(3)
 
 model = inference_wrapper.InferenceWrapper(model)
 
@@ -67,12 +67,13 @@ val_dataloader = torch.utils.data.DataLoader(val_dataset,
 
 with torch.no_grad(), torch.jit.optimized_execution(True):
     for i, sample in tqdm(enumerate(val_dataloader), smoothing=0.01):
-        if i == 25:
+        if i == 200:
             print('Quantizing...')
             torch.quantization.convert(model, inplace=True)
             with torch.jit.optimized_execution(True):
                 model = torch.jit.script(model)
             torch.jit.save(model, os.path.join(workdir, 'model_quantized.ts'))
+            exit(0)
         image = sample['image'].to(device)
         # mask = sample['semantic_mask'].to(device, non_blocking=True)
 

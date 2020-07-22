@@ -15,7 +15,8 @@ class InferenceWrapper(nn.Module):
                                                                  size=[image.size(2), image.size(3)],
                                                                  mode='bilinear',
                                                                  align_corners=False)
-        probabilities = torch.softmax(high_resolution_logits, dim=1)
+        # probabilities = torch.softmax(high_resolution_logits, dim=1)
+        probabilities = torch.sigmoid(high_resolution_logits)
         class_indices = torch.argmax(high_resolution_logits, dim=1)
         binary_mask_nhwc = torch.nn.functional.one_hot(class_indices, num_classes=2)
         binary_mask_nchw = binary_mask_nhwc.permute(dims=(0, 3, 1, 2)).to(probabilities)

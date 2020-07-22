@@ -5,7 +5,6 @@ from functools import partial
 import torch
 import losses
 import cv2
-
 from optimizers.ranger import Ranger
 from optimizers.diffmod import DiffMod
 
@@ -58,7 +57,7 @@ common = dict(
     world_size=4,
     use_cpu=False,
     workers=4,
-    output_dir='runs/41_hrnet-big-msa-classic-transfuse-w48_BCE0.75-DICE0.25_harder-aug_coco-no-blank-pretrain',
+    output_dir='runs/55_ema_hrnet-small-msa-classic-transfuse-w48_Focal0.5-RMISigmoid0.5_SGDR-To10-Tm2_harder-aug_finetune_dataset_5',
     num_classes=2,
     image_size=1024,
 )
@@ -113,7 +112,7 @@ common = dict(
 #                                    initial_channels=64,
 #                                    max_depth=512,
 #                                    out_channels=1))
-model = dict(model_fn=partial(MultiscaleAttention, model_fn=partial(get_pose_net, cfg=POSE_HIGHER_RESOLUTION_NET), num_feature_channels=48+96+192+384, num_scales=2),
+model = dict(model_fn=partial(MultiscaleAttention, model_fn=partial(get_pose_net, cfg=POSE_HIGHER_RESOLUTION_NET), num_feature_channels=32+64+128+256, num_scales=2),
              discriminator=partial(Discriminator,
                                    num_layers=5,
                                    initial_channels=64,
@@ -122,33 +121,37 @@ model = dict(model_fn=partial(MultiscaleAttention, model_fn=partial(get_pose_net
 
 # Train params
 train = dict(
-    print_freq=10,
-    batch_size_per_worker=4,
+    print_freq=9,
+    batch_size_per_worker=10,
     virtual_batch_size_multiplier=1,
     num_dataloader_workers=4,
 
     crop_size=512,
     gradient_clip_value=5.0,
 
+    # Semi-supervised training hyperparams
+    use_semi_supervised=False,
     mask_proportion_range=(0.45, 0.55),
     sigma_range=(8, 32),
-    consistency_loss_weight=1,
+    consistency_loss_weight=10,
     ema_model_alpha=0.99,
     confidence_threshold=0.97
 )
-train['base_lr'] = 0.001 * train['virtual_batch_size_multiplier']
+train['base_lr'] = 0.0001 * train['virtual_batch_size_multiplier'] / 4 * 9
 train['loss'] = losses.CalculateLoss([
-    {'loss_fn': losses.DenseCrossEntropyLossWithLogits(reduction='mean'), 'weight': [0.75]},
-    {'loss_fn': losses.DiceWithLogitsLoss(), 'weight': [0.25]}
-    # {'loss_fn': losses.OhemCrossEntropy(), 'weight': 1.0}
-    # {'loss_fn': losses.FocalLoss(alpha=0.5, gamma=2), 'weight': [0.0, 1.0]}
+    # {'loss_fn': losses.DenseCrossEntropyLossWithLogits(reduction='mean'), 'weight': [0.5]},
+    {'loss_fn': losses.DenseBinaryCrossEntropyLossWithLogits(reduction='mean'), 'weight': [0.5]},
+    # {'loss_fn': losses.DiceWithLogitsLoss(), 'weight': [0.125]},
+    # {'loss_fn': losses.OhemCrossEntropy(), 'weight': [1.0]}
+    # {'loss_fn': losses.FocalLoss(alpha=0.5, gamma=2), 'weight': [0.5]},
+    {'loss_fn': losses.RMILoss(num_classes=2, rmi_radius=3, rmi_pool='avg', rmi_pool_size=4, rmi_pool_stride=4), 'weight': [0.5]},
 ])
 
 train['min_lr'] = train['base_lr'] * 0.001
 train['optimizer'] = partial(torch.optim.SGD,
                              lr=train['base_lr'],
                              momentum=0.9,
-                             weight_decay=0.0001)
+                             weight_decay=0.0005)
 # train['optimizer'] = partial(torch.optim.Adam,
 #                              lr=train['base_lr'])
 # train['optimizer'] = partial(DiffMod,
@@ -158,16 +161,21 @@ train['optimizer'] = partial(torch.optim.SGD,
 #                              version=0,
 #                              eps=1e-8,
 #                              weight_decay=0.0001)
-train['lr_scheduler'] = partial(torch.optim.lr_scheduler.ReduceLROnPlateau,
-                                mode='min',
-                                factor=0.1,
-                                patience=20, # 20
-                                verbose=False,
-                                threshold=0.0001,
-                                threshold_mode='rel',
-                                cooldown=0,
-                                min_lr=train['min_lr'],
-                                eps=1e-08)
+# train['lr_scheduler'] = partial(torch.optim.lr_scheduler.ReduceLROnPlateau,
+#                                 mode='min',
+#                                 factor=0.1,
+#                                 patience=20, # 20
+#                                 verbose=False,
+#                                 threshold=0.0001,
+#                                 threshold_mode='rel',
+#                                 cooldown=0,
+#                                 min_lr=train['min_lr'],
+#                                 eps=1e-08)
+train['lr_scheduler'] = partial(torch.optim.lr_scheduler.CosineAnnealingWarmRestarts,
+                                T_0=300,
+                                T_mult=2,
+                                eta_min=train['base_lr'] * 0.01,
+                                last_epoch=-1)
 train['augmentations'] = ReplayCompose([
     LongestMaxSize(max_size=common['image_size'], always_apply=True),
     # SmallestMaxSize(max_size=common['image_size'], always_apply=True),
@@ -213,8 +221,8 @@ train['unsupervised_augmentations'] = ReplayCompose([
     ToFloat()])
 train['dataset'] = partial(dataset.SkinSegDataset,
                            # dataset_dir='/home/alex/Code/instascraped/dataset_coco_no-blank',
-                           dataset_dir='/mnt/ramdisk/dataset_coco_no-blank',
-                           # dataset_dir='/home/alex/Code/instascraped/dataset_5_no-blank',
+                           # dataset_dir='/mnt/ramdisk/dataset_coco_no-blank',
+                           dataset_dir='/home/alex/Code/instascraped/dataset_5_no-blank',
                            augmentations=train['augmentations'],
                            partition=1)
 train['unsupervised_dataset'] = partial(unsupervised_dataset.UnsupervisedImagesDataset,
@@ -224,8 +232,8 @@ train['unsupervised_dataset'] = partial(unsupervised_dataset.UnsupervisedImagesD
                                             '/home/alex/Code/instascraped/annotations_partitions/unsupervised_partition_3'
                                         ],
                                         augmentations=train['unsupervised_augmentations'])
-# train['pretrained_checkpoint_path'] = 'runs/32_hrnet-classic-transfuse-w48_coco-no-blank-pretrain/checkpoint.pth'
-train['pretrained_checkpoint_path'] = ''
+train['pretrained_checkpoint_path'] = 'runs/44_hrnet-small-msa-classic-transfuse-w48_BCE0.5-RMISigmoid0.5_SGDR-To10-Tm2_harder-aug_coco-no-blank-pretrain/checkpoint.pth'
+# train['pretrained_checkpoint_path'] = ''
 
 # Val params
 val = dict(
@@ -234,15 +242,17 @@ val = dict(
     num_dataloader_workers=4,
 )
 val['augmentations'] = ReplayCompose([
-    # LongestMaxSize(max_size=common['image_size'], always_apply=True),
-    SmallestMaxSize(max_size=common['image_size'], always_apply=True),
-    CenterCrop(height=common['image_size'], width=common['image_size'], always_apply=True),
+    LongestMaxSize(max_size=common['image_size'], always_apply=True),
+
+    # SmallestMaxSize(max_size=common['image_size'], always_apply=True),
+    # CenterCrop(height=common['image_size'], width=common['image_size'], always_apply=True),
+
     # PadIfNeeded(min_height=common['image_size'], min_width=common['image_size'], always_apply=True, border_mode=cv2.BORDER_CONSTANT),
     # PadIfNeeded(min_height=train['crop_size'], min_width=train['crop_size'], border_mode=cv2.BORDER_CONSTANT, always_apply=True),
     ToFloat()])
 val['dataset'] = partial(dataset.SkinSegDataset,
                          # dataset_dir='/home/alex/Code/instascraped/dataset_coco_no-blank',
-                         dataset_dir='/mnt/ramdisk/dataset_coco_no-blank',
-                         # dataset_dir='/home/alex/Code/instascraped/dataset_5_no-blank',
+                         # dataset_dir='/mnt/ramdisk/dataset_coco_no-blank',
+                         dataset_dir='/home/alex/Code/instascraped/dataset_5_no-blank',
                          augmentations=val['augmentations'],
                          partition=0)

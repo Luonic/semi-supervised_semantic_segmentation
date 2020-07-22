@@ -60,16 +60,17 @@ def train(model, ema_model, optimizer, dataloader, unsupervised_dataloader, epoc
 
             (sup_loss / config['train']['virtual_batch_size_multiplier']).backward()
             del pred_maps
+            del features
 
             # Unsupervised training
-            if False:
+            if config['train']['use_semi_supervised']:
                 unsupervised_image_a = next(unsupervised_dataloader)['image'].to(device, non_blocking=True)
                 unsupervised_image_b = next(unsupervised_dataloader)['image'].to(device, non_blocking=True)
                 with torch.no_grad():
-                    ema_pred_a = ema_model(unsupervised_image_a)[-1]
+                    ema_pred_a = ema_model(unsupervised_image_a)[-1][-1]
                     ema_pred_a = torch.nn.functional.interpolate(ema_pred_a, unsupervised_image_a.shape[2:4],
                                                                  mode='bilinear', align_corners=False)
-                    ema_pred_b = ema_model(unsupervised_image_b)[-1]
+                    ema_pred_b = ema_model(unsupervised_image_b)[-1][-1]
                     ema_pred_b = torch.nn.functional.interpolate(ema_pred_b, unsupervised_image_a.shape[2:4],
                                                                  mode='bilinear', align_corners=False)
 
@@ -84,26 +85,29 @@ def train(model, ema_model, optimizer, dataloader, unsupervised_dataloader, epoc
                                                                      unsupervised_image_b,
                                                                      mask)
                     del mask
+                    del ema_pred_a, ema_pred_b
 
                 model.eval()
-                mixed_student_pred = model(mixed_unsupervised_images)[-1]
+                mixed_student_pred = model(mixed_unsupervised_images)[-1][-1]
                 model.train()
                 mixed_student_pred = torch.nn.functional.interpolate(mixed_student_pred, mixed_unsupervised_images.shape[2:4],
                                                                      mode='bilinear', align_corners=False)
                 del mixed_unsupervised_images
-                mixed_ema_pred_prob = torch.softmax(mixed_ema_pred, dim=1)
+
+                # mixed_ema_pred_prob = torch.softmax(mixed_ema_pred, dim=1)
+                mixed_ema_pred_prob = torch.sigmoid(mixed_ema_pred)
+                # mixed_student_pred_prob = torch.softmax(mixed_student_pred, dim=1)
+                mixed_student_pred_prob = torch.sigmoid(mixed_student_pred)
+
                 confidence_modulator = (mixed_ema_pred_prob.max(dim=1).values > config['train']['confidence_threshold'])\
                     .to(mixed_ema_pred_prob)
 
-                consistency_loss = torch.pow(torch.softmax(mixed_student_pred, dim=1) - mixed_ema_pred_prob,
-                                             exponent=2.0)
+                consistency_loss = torch.pow(mixed_student_pred_prob - mixed_ema_pred_prob, exponent=2.0)
                 consistency_loss = (consistency_loss.sum(dim=1) * confidence_modulator).sum() / confidence_modulator.sum()
-
                 consistency_loss = consistency_loss.mean()
                 confidence_modulator = confidence_modulator.mean()
                 reduced_confidence_modulator = utils.reduce_tensor(confidence_modulator) / world_size
                 avg_confidence_modulator.update(reduced_confidence_modulator.item())
-
 
                 unsup_loss = consistency_loss * config['train']['consistency_loss_weight'] * float(epoch > 25)
                 reduced_unsup_loss = utils.reduce_tensor(unsup_loss) / world_size
@@ -119,7 +123,7 @@ def train(model, ema_model, optimizer, dataloader, unsupervised_dataloader, epoc
                 optimizer.step()
                 optimizer.zero_grad()
 
-            if False:
+            if config['train']['use_semi_supervised']:
                 del mixed_ema_pred
                 del unsup_loss
 

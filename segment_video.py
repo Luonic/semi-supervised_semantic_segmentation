@@ -2,25 +2,28 @@ import cv2
 import numpy as np
 
 import torch
-from albumentations import ReplayCompose, LongestMaxSize, ToFloat
+from albumentations import Compose, LongestMaxSize, ToFloat, MotionBlur
 
-# MODEL_PATH = 'runs/34_hrnet-classic-transfuse-w48_BCE0.75-DICE0.25_harder-aug_finetune_dataset-5/model.ts'
-MODEL_PATH = 'runs/41_hrnet-big-msa-classic-transfuse-w48_BCE0.75-DICE0.25_harder-aug_coco-no-blank-pretrain/model_quantized.ts'
-# MODEL_DEVICE = 'cuda:1'
-MODEL_DEVICE = 'cpu'
+MODEL_PATH = 'runs/55_ema_hrnet-small-msa-classic-transfuse-w48_Focal0.5-RMISigmoid0.5_SGDR-To10-Tm2_harder-aug_finetune_dataset_5/model.ts'
+MODEL_DEVICE = 'cuda:1'
+# MODEL_DEVICE = 'cpu'
 model = torch.jit.load(MODEL_PATH)
 model.to(MODEL_DEVICE)
-augmentations = ReplayCompose([
+augmentations = Compose([
     LongestMaxSize(max_size=1024, always_apply=True),
+    # MotionBlur(blur_limit=25, always_apply=True),
     # PadIfNeeded(min_height=1024, min_width=1024, always_apply=True),
     ToFloat()])
 
-# video_capture = cv2.VideoCapture(0)
-video_capture = cv2.VideoCapture('/home/alex/Videos/Face Recognition/Render.mp4')
+video_capture = cv2.VideoCapture(0, cv2.CAP_V4L2)
+video_capture.set(cv2.CAP_PROP_FRAME_WIDTH, 1920);
+video_capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080);
+# video_capture = cv2.VideoCapture('/home/alex/Videos/nike_ad.mp4')
 
 while True:
     # Capture frame-by-frame
-    ret, image = video_capture.read()
+    for i in range(1):
+        ret, image = video_capture.read()
     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     orig_image = image = augmentations(image=image)['image']
     image = np.transpose(image, axes=(2, 0, 1))

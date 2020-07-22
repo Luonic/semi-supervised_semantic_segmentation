@@ -30,7 +30,6 @@ def distributed_train(rank, cfg_path):
 
     # torch.autograd.set_detect_anomaly(True)
 
-    # model = cfg['model']['model_fn'](cfg['common']['num_classes'])
     model = cfg['model']['model_fn']()
     model = model.to(device)
     if device != 'cpu':
@@ -58,13 +57,14 @@ def distributed_train(rank, cfg_path):
     if os.path.exists(pretrained_checkpoint_path):
         checkpoint = torch.load(pretrained_checkpoint_path, map_location=lambda storage, loc: storage)
         model.module.load_state_dict(checkpoint['state_dict'], strict=False)
+        # Do not load ema model from pretrained checkpoint
         ema_model.load_state_dict(checkpoint['state_dict'], strict=False)
         if rank == 0:
             print(f'Loaded pretrained checkpoint {pretrained_checkpoint_path}')
         del checkpoint
         torch.cuda.empty_cache()
 
-    ema_model.load_state_dict(model.module.state_dict())
+    # ema_model.load_state_dict(model.module.state_dict())
     ema_model.eval()
     # ema_model.train()
 
@@ -77,7 +77,7 @@ def distributed_train(rank, cfg_path):
                                 map_location=lambda storage, loc: storage)
         model.module.load_state_dict(checkpoint['state_dict'], strict=False)
         ema_model.load_state_dict(checkpoint['ema_state_dict'], strict=False)
-        # optimizer.load_state_dict(checkpoint['optimizer'])
+        optimizer.load_state_dict(checkpoint['optimizer'])
         best_metric = checkpoint['best_metric']
         last_epoch = checkpoint['epoch']
         print(f'Loaded checkpoint: Epoch {checkpoint["epoch"]}')
@@ -125,7 +125,10 @@ def distributed_train(rank, cfg_path):
         summary_writer = None
 
     torch.cuda.empty_cache()
-    for epoch in range(last_epoch, 999): #60 + 60 * 2 + 60 * 4
+    for epoch in range(last_epoch, 300): #60 + 60 * 2 + 60 * 4
+        if isinstance(lr_scheduler, torch.optim.lr_scheduler.CosineAnnealingWarmRestarts):
+            lr_scheduler.step(epoch)
+
         train_sampler.set_epoch(epoch)
         global_step = utils.calc_global_step(dataset_len=len(train_dataset), world_size=cfg['common']['world_size'],
                                              batch_size_per_worker=cfg['train']['batch_size_per_worker'], epoch=epoch)
@@ -161,21 +164,23 @@ def distributed_train(rank, cfg_path):
         torch.cuda.empty_cache()
         torch.distributed.barrier()
 
-        lr_scheduler.step(val_loss, epoch=epoch + 1)
+        if isinstance(lr_scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+            lr_scheduler.step(val_loss, epoch=epoch + 1)
+
 
         # TODO: Save checkpoint here
         if rank == 0:
             torch.save({
                 'epoch': epoch + 1,
-                'best_metric': val_metric,
+                'best_metric': val_loss,
                 'state_dict': model.module.state_dict(),
                 'ema_state_dict': ema_model.state_dict(),
                 'optimizer': optimizer.state_dict(),
             }, os.path.join(train_dir, 'checkpoint.pth'))
             print(f'Saved checkpoint')
 
-            if best_metric is None or val_metric > best_metric:
-                best_metric = val_metric
+            if best_metric is None or val_loss < best_metric:
+                best_metric = val_loss
                 shutil.copy2(os.path.join(train_dir, 'checkpoint.pth'),
                              os.path.join(train_dir, 'best.pth'))
 
